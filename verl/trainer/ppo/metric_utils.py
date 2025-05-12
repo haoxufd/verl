@@ -421,5 +421,6 @@ def process_validation_metrics(data_sources: list[str], sample_inputs: list[str]
         for var_name, metric2prompt_vals in var2metric2prompt_vals.items():
             for metric_name, prompt_vals in metric2prompt_vals.items():
                 data_src2var2metric2val[data_source][var_name][metric_name] = np.mean(prompt_vals)
+    
 
     return data_src2var2metric2val

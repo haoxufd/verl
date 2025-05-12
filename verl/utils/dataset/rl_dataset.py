@@ -154,6 +154,9 @@ class RLHFDataset(Dataset):
 
         return messages
 
+    def _apply_chat_template(self, messages: list):
+        return messages[0]["content"] + ' User: ' + messages[1]["content"] + ' Assistant: '
+
     def __getitem__(self, item):
         """
         Note that we also return the raw_input_ids so that it can be combined with other chat template
@@ -195,6 +198,7 @@ class RLHFDataset(Dataset):
 
         else:
             raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+            # raw_prompt = self._apply_chat_template(messages)
             model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")
