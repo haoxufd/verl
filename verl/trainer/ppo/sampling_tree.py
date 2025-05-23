@@ -3,9 +3,14 @@ import numpy as np
 import torch
 
 from verl import DataProto
-from verl.utils.reward_score.gsm8k import extract_solution as extract_solution_gsm8k
+from verl.utils.reward_score.gsm8k_step_seperate import extract_solution as extract_solution_gsm8k
 
 from graphviz import Digraph
+
+import json
+import os
+from pathlib import Path
+from typing import Dict, Any
 
 class ChildrenFullError(Exception):
     """
@@ -201,18 +206,27 @@ class SamplingTree:
         response_mask = torch.zeros(self.max_response_length, dtype=torch.int64)
         response_mask[:response_length] = 1
 
-        input_id = prompt + response
+        input_id = torch.cat([prompt, response], dim=0)
         attention_mask = torch.zeros(self.max_prompt_length, dtype=torch.int64)
         attention_mask[-prompt_length:] = 1
         attention_mask = torch.cat([attention_mask, response_mask], dim=0)
 
-        position_id = get_position_ids_from_attention_mask(attention_mask)
+        position_id = get_position_ids_from_attention_mask(attention_mask.reshape(1, -1))
+        position_id = position_id.reshape(-1)
 
         advantage = []
         for node in output_nodes:
             advantage.extend([node.advantage] * len(node.token_sequence))
         advantage = advantage[:self.max_response_length] if len(advantage) > self.max_response_length else advantage + [0.0] * (self.max_response_length - len(advantage))
         advantage = torch.tensor(advantage, dtype=torch.float32)
+
+        score = []
+        for node in output_nodes:
+            score.extend([node.score] * len(node.token_sequence))
+        score = score[:self.max_response_length] if len(score) > self.max_response_length else score + [0.0] * (self.max_response_length - len(score))
+        score = torch.tensor(score, dtype=torch.float32)
+
+        reward = score
 
         return {
             "input_id": input_id,
@@ -222,7 +236,9 @@ class SamplingTree:
             "response": response,
             "response_mask": response_mask,
             "advantage": advantage,
-            "return": advantage
+            "return": advantage,
+            "score": score,
+            "reward": reward
         }
   
     def collect_batch_data(self):
@@ -236,7 +252,17 @@ class SamplingTree:
             visited[node] = False
         visited[self.root] = True
 
-        tensor_data = {"input_ids": [], "attention_mask": [], "position_ids": [], "prompts": [], "responses": [], "response_mask": [], "advantages": [], "returns": []}
+        tensor_data = {
+            "input_ids": [], 
+            "attention_mask": [], 
+            "position_ids": [], 
+            "prompts": [], 
+            "responses": [], 
+            "response_mask": [], 
+            "advantages": [], 
+            "returns": [],
+            "token_level_scores": [],
+            "token_level_rewards": []}
         batch_key_to_piece_key = {
             "input_ids": "input_id",
             "attention_mask": "attention_mask",
@@ -245,7 +271,9 @@ class SamplingTree:
             "responses": "response",
             "response_mask": "response_mask",
             "advantages": "advantage",
-            "returns": "return"
+            "returns": "return",
+            "token_level_scores": "score",
+            "token_level_rewards": "reward"
         }
 
         for node in leaf_nodes:
@@ -282,6 +310,103 @@ class SamplingTree:
         }
         
         return DataProto.from_single_dict({**tensor_batch_dict, **non_tensor_batch_dict})
+    
+    def visualize(self, output_file="tree_visualization.html", auto_open=True):
+        """
+        生成交互式HTML树形可视化
+        
+        Args:
+            output_file (str): 输出HTML文件名
+            auto_open (bool): 是否自动在浏览器中打开
+        """
+        # 1. 将树转换为JSON格式
+        tree_data = self._tree_to_json()
+        
+        # 2. 生成HTML内容
+        html_content = self._generate_html_from_template(tree_data)
+        
+        # 3. 保存为HTML文件
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        
+        print(f"可视化文件已保存为: {output_file}")
+        
+    
+    def _tree_to_json(self) -> Dict[str, Any]:
+        """将树结构转换为D3.js友好的JSON格式"""
+        
+        def node_to_dict(node, node_id=0):
+            # 处理文本显示（截断过长文本）
+            display_text = ""
+            full_text = node.text or ""
+            if full_text:
+                display_text = full_text[:50] + "..." if len(full_text) > 50 else full_text
+            
+            # 处理token序列显示
+            token_str = str(node.token_sequence)
+            display_tokens = token_str[:30] + "..." if len(token_str) > 30 else token_str
+            
+            node_data = {
+                "id": node_id,
+                "name": f"Node {node.depth}" if not node.is_root else "Root",
+                "score": round(node.score, 4) if node.score is not None else "N/A",
+                "advantage": round(node.advantage, 4) if node.advantage is not None else "N/A",
+                "text": display_text,
+                "full_text": full_text,
+                "token_sequence": node.token_sequence,
+                "display_tokens": display_tokens,
+                "depth": node.depth,
+                "is_root": node.is_root,
+                "is_leaf": node.is_leaf,
+                "children_count": len(node.children),
+                "children": []
+            }
+            
+            # 递归处理子节点
+            child_id = node_id + 1
+            for child in node.children:
+                child_data, child_id = node_to_dict(child, child_id)
+                node_data["children"].append(child_data)
+            
+            return node_data, child_id
+        
+        root_data, _ = node_to_dict(self.root)
+        
+        # 添加树的元信息
+        tree_info = {
+            "tree_data": root_data,
+            "meta_info": {
+                "final_answer": getattr(self, 'final_answer', 'N/A'),
+                "total_nodes": len(self.all_nodes),
+                "max_depth": max(node.depth for node in self.all_nodes),
+                "order": getattr(self, 'order', 'N/A')
+            }
+        }
+        
+        return tree_info
+    
+    def _generate_html_from_template(self, tree_data: Dict[str, Any]) -> str:
+        """从模板文件生成HTML内容"""
+        # 获取模板文件路径
+        template_dir = Path(__file__).parent / "templates"
+        template_path = template_dir / "tree_visualization.html"
+        
+        # 如果模板文件不存在，提示用户
+        if not template_path.exists():
+            raise FileNotFoundError(
+                f"模板文件未找到: {template_path}\n"
+                f"请确保 templates/tree_visualization.html 文件存在"
+            )
+        
+        # 读取模板文件
+        with open(template_path, 'r', encoding='utf-8') as f:
+            template = f.read()
+        
+        # 替换数据占位符
+        tree_json = json.dumps(tree_data, ensure_ascii=False, indent=2)
+        html_content = template.replace('{tree_json}', tree_json)
+        
+        return html_content
     
 
 def print_tree(node, level=0):
@@ -546,9 +671,6 @@ def build_sampling_trees(batch_dict, actor_rollout_wg, tokenizer, config):
         raw_prompt_ids = np.array(input_ids, dtype='O')
         # Create tensors of input_ids, attention_mask, and position_ids
         input_ids = [[tokenizer.pad_token_id] * (config.data.max_prompt_length - len(seq)) + seq for seq in input_ids]
-        for seq in input_ids:
-            if len(seq) > config.data.max_prompt_length:
-                breakpoint()
         input_ids = torch.tensor(input_ids, dtype=torch.int64)
         attention_mask = (input_ids != tokenizer.pad_token_id).to(torch.int64)
         position_ids = get_position_ids_from_attention_mask(attention_mask)

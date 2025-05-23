@@ -126,6 +126,7 @@ class ResourcePoolManager:
         """Check if the resource pool can be satisfied in this ray cluster."""
         node_available_resources = ray.state.available_resources_per_node()
         node_available_gpus = {node: node_info.get("GPU", 0) for node, node_info in node_available_resources.items()}
+        print(f"Available GPUs per node: {node_available_gpus}")
 
         # check total required gpus can be satisfied
         total_available_gpus = sum(node_available_gpus.values())
@@ -900,24 +901,18 @@ class RayPPOTrainer:
                     with _timer("score", timing_raw):
                         for sampling_tree in sampling_trees:
                             sampling_tree.compute_scores()
-                    print_tree(sampling_trees[0])
-                    print_tree(sampling_trees[63])
-                    breakpoint()
                     
                     with _timer("adv", timing_raw):
                         for sampling_tree in sampling_trees:
                             sampling_tree.compute_advantages()
-                    breakpoint()
 
                     with _timer("collect batch", timing_raw):
                         batch_list = []
                         for sampling_tree in sampling_trees:
                             batch_list.append(sampling_tree.collect_batch_data())
-                        
-                        batch = batch_list[0]
-                        for i in range(1, len(batch_list)):
-                            batch = batch.union(batch_list[i]) 
-                    breakpoint()
+                        batch = DataProto.concat(batch_list)
+                        world_size = self.actor_rollout_wg.world_size
+                        batch.padding(world_size - (len(batch) % world_size), "last")
 
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.

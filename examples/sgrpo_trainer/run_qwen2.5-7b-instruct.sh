@@ -7,8 +7,8 @@ python3 -m verl.trainer.main_ppo_sgrpo \
     algorithm.adv_estimator=grpo \
     data.train_files=$HOME/data/gsm8k_step_seperate/train.parquet \
     data.val_files=$HOME/data/gsm8k_step_seperate/test.parquet \
-    data.train_batch_size=64 \
-    data.max_prompt_length=1536 \
+    data.train_batch_size=128 \
+    data.max_prompt_length=1325 \
     data.max_response_length=1024 \
     +data.step_split_str='\n\n' \
     data.filter_overlong_prompts=False \
@@ -16,7 +16,7 @@ python3 -m verl.trainer.main_ppo_sgrpo \
     actor_rollout_ref.model.path=$HOME/models/Qwen2.5-7B-Instruct \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=64 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=128 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
@@ -30,7 +30,7 @@ python3 -m verl.trainer.main_ppo_sgrpo \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=1 \
-    +actor_rollout_ref.rollout.order=2 \
+    +actor_rollout_ref.rollout.order=3 \
     +actor_rollout_ref.rollout.max_tree_depth=3 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
@@ -38,12 +38,12 @@ python3 -m verl.trainer.main_ppo_sgrpo \
     trainer.resume_mode=disable \
     +trainer.val_only=False \
     trainer.critic_warmup=0 \
-    trainer.logger=['console'] \
+    trainer.logger=['console','wandb'] \
     trainer.project_name='step_wise_grpo' \
-    trainer.experiment_name='grpo_qwen2.5_7b_gsm8k' \
-    trainer.default_local_dir=$HOME/checkpoints/step_wise_grpo/grpo_qwen2.5_7b_gsm8k \
-    trainer.n_gpus_per_node=2 \
+    trainer.experiment_name='sgrpo_qwen2.5_7b_instruct_gsm8k' \
+    trainer.default_local_dir=$HOME/checkpoints/step_wise_grpo/sgrpo_qwen2.5_7b_instruct_gsm8k \
+    trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=20 \
-    trainer.test_freq=5 \
-    trainer.total_epochs=15 $@
+    trainer.test_freq=1 \
+    trainer.total_epochs=1 $@

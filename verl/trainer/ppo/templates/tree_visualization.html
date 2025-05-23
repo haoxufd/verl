@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sampling Tree Visualization</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        .container {
+            display: flex;
+            gap: 20px;
+            height: 90vh;
+        }
+        
+        .tree-panel {
+            flex: 1;
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .info-panel {
+            width: 350px;
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            overflow-y: auto;
+        }
+        
+        .tree-container {
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        
+        /* 节点样式 */
+        .node {
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        
+        .node:hover {
+            filter: brightness(1.1);
+        }
+        
+        .node circle {
+            fill: #4CAF50;
+            stroke: #2E7D32;
+            stroke-width: 2px;
+            transition: all 0.2s ease;
+        }
+        
+        .node.root circle {
+            fill: #FF9800;
+            stroke: #F57C00;
+        }
+        
+        .node.leaf circle {
+            fill: #2196F3;
+            stroke: #1976D2;
+        }
+        
+        .node.collapsed circle {
+            fill: #9E9E9E;
+            stroke: #616161;
+        }
+        
+        .node text {
+            font-size: 11px;
+            font-weight: 500;
+            fill: #333;
+            text-anchor: middle;
+            dominant-baseline: middle;
+            pointer-events: none;
+        }
+        
+        .node-label {
+            font-size: 10px;
+            fill: #666;
+            text-anchor: start;
+        }
+        
+        /* 连接线样式 */
+        .link {
+            fill: none;
+            stroke: #999;
+            stroke-width: 1.5px;
+            transition: all 0.2s ease;
+        }
+        
+        .link.highlight {
+            stroke: #FF5722;
+            stroke-width: 2px;
+        }
+        
+        /* 信息面板样式 */
+        .info-panel h3 {
+            margin-top: 0;
+            color: #333;
+            border-bottom: 2px solid #4CAF50;
+            padding-bottom: 10px;
+        }
+        
+        .meta-info {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+        
+        .node-details {
+            background: #fff3e0;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #FF9800;
+        }
+        
+        .detail-item {
+            margin-bottom: 12px;
+            padding: 8px;
+            background: white;
+            border-radius: 4px;
+            border: 1px solid #e0e0e0;
+        }
+        
+        .detail-label {
+            font-weight: bold;
+            color: #666;
+            font-size: 12px;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+        
+        .detail-value {
+            color: #333;
+            word-break: break-all;
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+            max-height: 100px;
+            overflow-y: auto;
+            background: #f9f9f9;
+            padding: 5px;
+            border-radius: 2px;
+        }
+        
+        .controls {
+            margin-bottom: 15px;
+            padding: 10px;
+            background: #e3f2fd;
+            border-radius: 4px;
+        }
+        
+        .btn {
+            background: #2196F3;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+            font-size: 12px;
+        }
+        
+        .btn:hover {
+            background: #1976D2;
+        }
+        
+        .tooltip {
+            position: absolute;
+            background: #333;
+            color: white;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+            z-index: 1000;
+            max-width: 200px;
+            word-wrap: break-word;
+        }
+    </style>
+</head>
+<body>
+    <h1>🌳 Sampling Tree Visualization</h1>
+    
+    <div class="container">
+        <div class="tree-panel">
+            <div class="controls">
+                <button class="btn" onclick="expandAll()">展开全部</button>
+                <button class="btn" onclick="collapseAll()">折叠全部</button>
+                <button class="btn" onclick="resetZoom()">重置缩放</button>
+            </div>
+            <div class="tree-container">
+                <svg id="tree-svg"></svg>
+            </div>
+        </div>
+        
+        <div class="info-panel">
+            <h3>📊 树信息</h3>
+            <div class="meta-info" id="meta-info">
+                <!-- 树的元信息将在这里显示 -->
+            </div>
+            
+            <h3>🔍 节点详情</h3>
+            <div class="node-details" id="node-details">
+                <p>点击节点查看详细信息</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 数据
+        const treeData = {tree_json};
+        let root = treeData.tree_data;
+        const metaInfo = treeData.meta_info;
+        
+        // D3 设置
+        const margin = {top: 20, right: 120, bottom: 20, left: 120};
+        const width = 800;
+        const height = 600;
+        
+        const svg = d3.select("#tree-svg")
+            .attr("width", width + margin.left + margin.right)
+            .attr("height", height + margin.bottom + margin.top);
+        
+        const g = svg.append("g")
+            .attr("transform", `translate(${margin.left},${margin.top})`);
+        
+        // 缩放和拖拽
+        const zoom = d3.zoom()
+            .scaleExtent([0.1, 3])
+            .on("zoom", (event) => {{
+                g.attr("transform", event.transform);
+            }});
+        
+        svg.call(zoom);
+        
+        // 树布局
+        const treemap = d3.tree().size([height, width]);
+        
+        // 初始化展开状态
+        function initializeCollapse(d) {
+            if (d.children) {
+                d._children = d.children;
+                if (d.depth > 1) { // 默认只展开根节点和第一层
+                    d.children = null;
+                }
+                d._children.forEach(initializeCollapse);
+            }
+        }
+        
+        // 创建根节点
+        root = d3.hierarchy(root, d => d.children);
+        root.x0 = height / 2;
+        root.y0 = 0;
+        
+        initializeCollapse(root);
+        
+        // 显示元信息
+        function displayMetaInfo() {
+            const metaDiv = document.getElementById('meta-info');
+            metaDiv.innerHTML = `
+                <div class="detail-item">
+                    <div class="detail-label">Final Answer</div>
+                    <div class="detail-value">${metaInfo.final_answer}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Total Nodes</div>
+                    <div class="detail-value">${metaInfo.total_nodes}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Max Depth</div>
+                    <div class="detail-value">${metaInfo.max_depth}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Order</div>
+                    <div class="detail-value">${metaInfo.order}</div>
+                </div>
+            `;
+        }
+        
+        // 显示节点详情
+        function displayNodeDetails(d) {
+            const detailsDiv = document.getElementById('node-details');
+            const data = d.data;
+            
+            detailsDiv.innerHTML = `
+                <div class="detail-item">
+                    <div class="detail-label">Node ID</div>
+                    <div class="detail-value">${data.id}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Name</div>
+                    <div class="detail-value">${data.name}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Score</div>
+                    <div class="detail-value">${data.score}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Advantage</div>
+                    <div class="detail-value">${data.advantage}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Depth</div>
+                    <div class="detail-value">${data.depth}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Children Count</div>
+                    <div class="detail-value">${data.children_count}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Text</div>
+                    <div class="detail-value">${data.full_text || 'N/A'}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Token Sequence</div>
+                    <div class="detail-value">${JSON.stringify(data.token_sequence)}</div>
+                </div>
+            `;
+        }
+        
+        // Tooltip
+        const tooltip = d3.select("body").append("div")
+            .attr("class", "tooltip")
+            .style("opacity", 0);
+        
+        // 更新树
+        function update(source) {
+            const treeData = treemap(root);
+            const nodes = treeData.descendants();
+            const links = treeData.descendants().slice(1);
+            
+            // 标准化固定深度
+            nodes.forEach(d => { d.y = d.depth * 180; });
+            
+            // 更新节点
+            const node = g.selectAll('g.node')
+                .data(nodes, d => d.id || (d.id = ++i));
+            
+            // 进入新节点
+            const nodeEnter = node.enter().append('g')
+                .attr('class', d => {
+                    let classes = 'node';
+                    if (d.data.is_root) classes += ' root';
+                    if (d.data.is_leaf) classes += ' leaf';
+                    if (d._children) classes += ' collapsed';
+                    return classes;
+                })
+                .attr("transform", d => `translate(${source.y0},${source.x0})`)
+                .on('click', click)
+                .on('mouseover', (event, d) => {
+                    tooltip.transition().duration(200).style("opacity", .9);
+                    tooltip.html(`
+                        <strong>${d.data.name}</strong><br/>
+                        Score: ${d.data.score}<br/>
+                        Advantage: ${d.data.advantage}<br/>
+                        Depth: ${d.data.depth}
+                    `)
+                    .style("left", (event.pageX + 10) + "px")
+                    .style("top", (event.pageY - 28) + "px");
+                })
+                .on('mouseout', () => {
+                    tooltip.transition().duration(500).style("opacity", 0);
+                });
+            
+            // 添加圆圈
+            nodeEnter.append('circle')
+                .attr('r', 1e-6);
+            
+            // 添加文本
+            nodeEnter.append('text')
+                .attr("dy", ".35em")
+                .attr("x", d => d.children || d._children ? -13 : 13)
+                .attr("text-anchor", d => d.children || d._children ? "end" : "start")
+                .text(d => `${d.data.name} (${d.data.score})`)
+                .style("fill-opacity", 1e-6);
+            
+            // 更新节点
+            const nodeUpdate = nodeEnter.merge(node);
+            
+            nodeUpdate.transition()
+                .duration(750)
+                .attr("transform", d => `translate(${d.y},${d.x})`);
+            
+            nodeUpdate.select('circle')
+                .transition()
+                .duration(750)
+                .attr('r', 8)
+                .style("fill", d => {
+                    if (d.data.is_root) return "#FF9800";
+                    if (d.data.is_leaf) return "#2196F3";
+                    return d._children ? "#9E9E9E" : "#4CAF50";
+                });
+            
+            nodeUpdate.select('text')
+                .transition()
+                .duration(750)
+                .style("fill-opacity", 1);
+            
+            // 移除节点
+            const nodeExit = node.exit().transition()
+                .duration(750)
+                .attr("transform", d => `translate(${source.y},${source.x})`)
+                .remove();
+            
+            nodeExit.select('circle')
+                .attr('r', 1e-6);
+            
+            nodeExit.select('text')
+                .style('fill-opacity', 1e-6);
+            
+            // 更新连接线
+            const link = g.selectAll('path.link')
+                .data(links, d => d.id);
+            
+            const linkEnter = link.enter().insert('path', "g")
+                .attr("class", "link")
+                .attr('d', d => {
+                    const o = {x: source.x0, y: source.y0};
+                    return diagonal(o, o);
+                });
+            
+            const linkUpdate = linkEnter.merge(link);
+            
+            linkUpdate.transition()
+                .duration(750)
+                .attr('d', d => diagonal(d, d.parent));
+            
+            link.exit().transition()
+                .duration(750)
+                .attr('d', d => {
+                    const o = {x: source.x, y: source.y};
+                    return diagonal(o, o);
+                })
+                .remove();
+            
+            // 存储旧位置
+            nodes.forEach(d => {
+                d.x0 = d.x;
+                d.y0 = d.y;
+            });
+        }
+        
+        // 折叠/展开函数
+        function click(event, d) {{
+            if (d.children) {{
+                d._children = d.children;
+                d.children = null;
+            }} else {{
+                d.children = d._children;
+                d._children = null;
+            }}
+            update(d);
+            displayNodeDetails(d);
+        }}
+        
+        // 创建连接线
+        function diagonal(s, d) {{
+            const path = `M ${s.y} ${s.x}
+                        C ${(s.y + d.y) / 2} ${s.x},
+                          ${(s.y + d.y) / 2} ${d.x},
+                          ${d.y} ${d.x}`;
+            return path;
+        }}
+        
+        // 控制函数
+        window.expandAll = function() {{
+            function expand(d) {{
+                if (d._children) {{
+                    d.children = d._children;
+                    d._children = null;
+                }}
+                if (d.children) d.children.forEach(expand);
+            }}
+            expand(root);
+            update(root);
+        }};
+        
+        window.collapseAll = function() {{
+            function collapse(d) {{
+                if (d.children) {{
+                    d._children = d.children;
+                    d.children = null;
+                    d._children.forEach(collapse);
+                }}
+            }}
+            root.children.forEach(collapse);
+            update(root);
+        }};
+        
+        window.resetZoom = function() {{
+            svg.transition().duration(750).call(
+                zoom.transform,
+                d3.zoomIdentity
+            );
+        }};
+        
+        // 初始化
+        let i = 0;
+        update(root);
+        displayMetaInfo();
+    </script>
+</body>
+</html>
