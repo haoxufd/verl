@@ -29,8 +29,9 @@ class Node:
     Attributes:
         children (list[Node]): References to all child nodes
         parent (Node): Reference to the parent node
-        content (str): The question or problem-solving step corresponding to this node
-        children_is_full (bool): Indicates whether the node's children are full (reached n)
+        token_sequence (list[int]): The token sequence of a question or a problem-solving step corresponding to this node
+        text (str): The result of decoding the token_sequence
+        children_is_full (bool): Indicates whether the node's children are full (reached max_children)
         is_leaf (bool): Indicates whether the node is a leaf node
     """
     
@@ -45,12 +46,6 @@ class Node:
                  text=None,
                  score=None,
                  depth=0) -> None:
-        """
-        Initialize a tree node.
-        
-        Args:
-            parent (Node): Reference to parent node, default is None
-        """
         self.children = [] if children is None else children
         self.parent = parent
         self.token_sequence = token_sequence
@@ -64,15 +59,6 @@ class Node:
         self.depth = depth
     
     def add_child(self, child_node):
-        """
-        Add a child node to the current node.
-        
-        Args:
-            child_node (Node): The child node to add
-            
-        Returns:
-            bool: True if the child was added successfully, False otherwise
-        """
         # Check if the node can accept more children
         if self.max_children is not None and len(self.children) >= self.max_children:
             raise ChildrenFullError(f"Cannot add child to node since children are full.")
@@ -108,10 +94,21 @@ class Node:
 
 class SamplingTree:
     """
-    Sampling tree.
+    An n-ary tree representing the rollout (sampling) process of step-wise grpo. Each SamplingTree instance corresponds to a single data, or a single question in the dataset.
     """
-
     def __init__(self, root_node, order, max_prompt_length, max_response_length, data_source, ability, reward_model, index, extra_info, tokenizer) -> None:
+        """
+        root_node (Node): The root node of the tree
+        order (int): The number of children each non-leaf node has
+        max_prompt_length (int): The maximum length of the prompt that the generator can handle
+        max_response_length (int): The maximum length of the response that the generator can output
+        data_source (str): The source of the data, e.g., "gsm8k"
+        ability (str): The ability level of the data, e.g., "easy", "medium", "hard"
+        reward_model (dict): The reward model used for evaluation, e.g., {"ground_truth": "42"}
+        index (int): The index of the data in the dataset
+        extra_info (dict): Additional information about the data, e.g., {"question": "Calculate 21 * 2", "answer": "42"}
+        tokenizer: The tokenizer used to process the text data
+        """
         self.root = root_node
         self.order = order
         self.extra_info = extra_info
@@ -127,37 +124,16 @@ class SamplingTree:
     
     
     def add_node(self, node1: Node, node2: Node):
-        """
-        Add a node to the tree.
-        
-        Args:
-            node1 (Node): The parent node
-            node2 (Node): The child node to add
-        """
-
         node1.add_child(node2)
         self.all_nodes.append(node2)
     
     def add_path(self, node: Node, path: list[Node]):
-        """
-        Add a path to the tree.
-        
-        Args:
-            path (list[Node]): The path to add
-        """
-        
         parent_node = node
         for nd in path:
             self.add_node(parent_node, nd)
             parent_node = nd
     
     def add_paths(self, node: Node, paths: list[list[Node]]):
-        """
-        Add multiple paths to the tree.
-        
-        Args:
-            paths (list[list[Node]]): The paths to add
-        """
         for path in paths:
             self.add_path(node, path)
     
@@ -175,54 +151,42 @@ class SamplingTree:
     
     def assemble_tensor_data(self, input_nodes, output_nodes):
         """
-        Assemble tensor data for the input and output nodes.
+        Assemble tensor data based on input and output nodes. The input nodes are for the prompt part, and the output nodes are for the response part.
+        This function processes the token sequences of the input and output nodes, constructs the input_id, attention_mask, response, response_mask and other necessary tensors for training.
         
         Args:
             input_nodes (list[Node]): The input nodes
             output_nodes (list[Node]): The output nodes
             
         Returns:
-            tuple: A tuple containing the input and output tensors
+            A dict containing all the necessary tensors
         """
         response = []
         response_mask = []
         prompt = []
 
-        for data in input_nodes:
-            prompt.extend(data.token_sequence)
+        for node in input_nodes:
+            prompt.extend(node.token_sequence)
         prompt_length = len(prompt)
-        prompt = prompt[:self.max_prompt_length] if len(prompt) > self.max_prompt_length else [self.tokenizer.pad_token_id] * (self.max_prompt_length - len(prompt)) + prompt
-        prompt = torch.tensor(prompt, dtype=torch.int64)
+        prompt = to_fixed_length_tensor(prompt, self.max_prompt_length, self.tokenizer.pad_token_id, "left", torch.int32)
 
         for node in output_nodes:
             response.extend(node.token_sequence)
         response_length = len(response)
-        response = response[:self.max_response_length] if len(response) > self.max_response_length else response + [self.tokenizer.pad_token_id] * (self.max_response_length - len(response))
-        response = torch.tensor(response, dtype=torch.int64)
+        response = to_fixed_length_tensor(response, self.max_response_length, self.tokenizer.pad_token_id, "right", torch.int32)
 
-        response_mask = torch.zeros(self.max_response_length, dtype=torch.int64)
+        response_mask = torch.zeros(self.max_response_length, dtype=torch.int32)
         response_mask[:response_length] = 1
 
         input_id = torch.cat([prompt, response], dim=0)
-        attention_mask = torch.zeros(self.max_prompt_length, dtype=torch.int64)
+        attention_mask = torch.zeros(self.max_prompt_length, dtype=torch.int32)
         attention_mask[-prompt_length:] = 1
         attention_mask = torch.cat([attention_mask, response_mask], dim=0)
 
-        position_id = get_position_ids_from_attention_mask(attention_mask.reshape(1, -1))
-        position_id = position_id.reshape(-1)
+        position_id = get_position_ids_from_attention_mask(attention_mask.reshape(1, -1)).reshape(-1)
 
-        advantage = []
-        for node in output_nodes:
-            advantage.extend([node.advantage] * len(node.token_sequence))
-        advantage = advantage[:self.max_response_length] if len(advantage) > self.max_response_length else advantage + [0.0] * (self.max_response_length - len(advantage))
-        advantage = torch.tensor(advantage, dtype=torch.float32)
-
-        score = []
-        for node in output_nodes:
-            score.extend([node.score] * len(node.token_sequence))
-        score = score[:self.max_response_length] if len(score) > self.max_response_length else score + [0.0] * (self.max_response_length - len(score))
-        score = torch.tensor(score, dtype=torch.float32)
-
+        advantage = to_fixed_length_tensor([node.advantage] * response_length, self.max_response_length, 0, "right", torch.float32)
+        score = to_fixed_length_tensor([node.score] * response_length, self.max_response_length, 0, "right", torch.float32)
         reward = score
 
         return {
@@ -240,7 +204,20 @@ class SamplingTree:
   
     def collect_batch_data(self):
         """
-        Collect batch data from the tree.
+        Collect batch data from the tree for training.
+        After the tree is built and advantages and scores are computed, this function collects all the necessary tensors for training.
+        The number of leaf nodes in the tree is the batch size, and each leaf node corresponds to a single piece of data.
+        For example, if the tree is like:
+                                      0
+                                    /   \
+                                   1     2
+                                  / \
+                                 3   4
+        Then we would get 3 pieces of data, which are:
+        0 -> 1 3
+        0 1 -> 4
+        0 -> 2
+        where the nodes before the arrow are input nodes and those after the arrow are output nodes.
         """
         leaf_nodes = [node for node in self.all_nodes if node.is_leaf]
 
@@ -260,7 +237,8 @@ class SamplingTree:
             "returns": [],
             "token_level_scores": [],
             "token_level_rewards": []}
-        batch_key_to_piece_key = {
+        
+        batch_key_to_single_key = {
             "input_ids": "input_id",
             "attention_mask": "attention_mask",
             "position_ids": "position_id",
@@ -288,7 +266,7 @@ class SamplingTree:
 
             single_tensor_data = self.assemble_tensor_data(input_nodes, output_nodes)
             for key in tensor_data.keys():
-                tensor_data[key].append(single_tensor_data[batch_key_to_piece_key[key]])
+                tensor_data[key].append(single_tensor_data[batch_key_to_single_key[key]])
             
             for nd in path[pos:]:
                 visited[nd] = True
@@ -327,7 +305,6 @@ class SamplingTree:
             f.write(html_content)
         
         print(f"可视化文件已保存为: {output_file}")
-        
     
     def _tree_to_json(self) -> Dict[str, Any]:
         """将树结构转换为D3.js友好的JSON格式"""
@@ -406,21 +383,29 @@ class SamplingTree:
         return html_content
     
 
-def print_tree(node, level=0):
+def to_fixed_length_tensor(seq: list[int], max_length: int, pad_token_id: int, pad_direction, dtype) -> torch.Tensor:
     """
-    Recursively print the tree starting from the given node.
+    Convert a sequence to a fixed-length tensor by padding or truncating.
     
     Args:
-        node (Node): The current node to print from. If None, starts from root.
-        level (int): The current depth level in the tree.
-    """
-    indent = "  " * level
-    print(f"{indent}- score: {node.score}, advantage: {node.advantage}")
-    print(f"{indent}  text: {repr(node.text)}")
-    print(f"{indent}  token_sequence: {node.token_sequence}")
+        seq: A list of integers representing the sequence
+        max_length: The maximum length of the tensor
+        pad_token_id: The token ID used for padding
+        pad_direction: The direction of padding, e.g., 'left' or 'right'
+        dtype: The data type of the tensor (e.g., torch.int32)
     
-    for child in getattr(node, "children", []):
-        print_tree(child, level + 1)
+    Returns:
+        A torch.Tensor of shape [max_length] with the sequence padded or truncated
+    """
+    if len(seq) > max_length:
+        seq = seq[:max_length]
+    else:
+        if pad_direction == 'left':
+            seq = [pad_token_id] * (max_length - len(seq)) + seq
+        elif pad_direction == 'right':
+            seq = seq + [pad_token_id] * (max_length - len(seq))
+    
+    return torch.tensor(seq, dtype=dtype)
 
 
 def get_position_ids_from_attention_mask(attention_mask):
@@ -554,6 +539,9 @@ def distribute_evenly(total, parts):
 
 
 def find_step_split_token_positions(input_ids, tokenizer, step_split_str="\n\n"):
+    """
+    Find positions of the step split token in the input_ids. Note that we cannot directly encode the step_split_str and find the encoding result in input_ids. For example, we seperately encode step_split_str to get step_split_token_ids but this token id sequence may not be in the input_ids, since the input_ids is the result of encoding the whole text. Even if the whole text contains the step_split_str, the tokenization may not match exactly.
+    """
     text = tokenizer.decode(input_ids)
     encoding = tokenizer(text, return_offsets_mapping=True)
     
@@ -575,7 +563,7 @@ def find_step_split_token_positions(input_ids, tokenizer, step_split_str="\n\n")
     return newline_token_positions
 
 
-def convert_split_positions(split_positions, num_parts):
+def pick_split_token_positions(split_positions, num_parts):
     """
     positions: a list of indices where the split token ids should occur.
     num_parts: the number of parts to split into.
@@ -668,8 +656,8 @@ def build_sampling_trees(batch_dict, actor_rollout_wg, tokenizer, config):
         raw_prompt_ids = np.array(input_ids, dtype='O')
         # Create tensors of input_ids, attention_mask, and position_ids
         input_ids = [[tokenizer.pad_token_id] * (config.data.max_prompt_length - len(seq)) + seq for seq in input_ids]
-        input_ids = torch.tensor(input_ids, dtype=torch.int64)
-        attention_mask = (input_ids != tokenizer.pad_token_id).to(torch.int64)
+        input_ids = torch.tensor(input_ids, dtype=torch.int32)
+        attention_mask = (input_ids != tokenizer.pad_token_id).to(torch.int32)
         position_ids = get_position_ids_from_attention_mask(attention_mask)
         
         gen_batch_dict = {
@@ -692,7 +680,7 @@ def build_sampling_trees(batch_dict, actor_rollout_wg, tokenizer, config):
         for idx, raw_response in enumerate(raw_responses):
             positions = find_step_split_token_positions(raw_response, tokenizer, config.data.step_split_str)
             # Remove the last position since it is "\n\n<answer>VALUE<answer>"
-            positions = convert_split_positions(positions[:-1], config.actor_rollout_ref.rollout.max_tree_depth - depths[idx // num_to_be_added_paths])
+            positions = pick_split_token_positions(positions[:-1], config.actor_rollout_ref.rollout.max_tree_depth - depths[idx // num_to_be_added_paths])
             sequences = split_list_by_positions(raw_response, positions)
             texts = [tokenizer.decode(seq, skip_special_tokens=False) for seq in sequences]
             path = [Node(token_sequence=sequences[i], max_children=order, text=texts[i]) for i in range(len(sequences))]
