@@ -902,8 +902,9 @@ class RayPPOTrainer:
                             sampling_tree.compute_scores()
                     
                     with _timer("adv", timing_raw):
-                        for sampling_tree in sampling_trees:
+                        for i, sampling_tree in enumerate(sampling_trees):
                             sampling_tree.compute_advantages()
+                            sampling_tree.visualize(output_file=self.config.data.output_dir + f"/sampling_trees_{self.global_steps}/tree_{i}.html")
 
                     with _timer("collect batch", timing_raw):
                         batch_list = []

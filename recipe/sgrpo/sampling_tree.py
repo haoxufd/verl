@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 from typing import Dict, Any
 
+import os
+
 class ChildrenFullError(Exception):
     """
     Custom exception to indicate that a node's children are full.
@@ -299,6 +301,8 @@ class SamplingTree:
         
         # 2. 生成HTML内容
         html_content = self._generate_html_from_template(tree_data)
+
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
         
         # 3. 保存为HTML文件
         with open(output_file, 'w', encoding='utf-8') as f:

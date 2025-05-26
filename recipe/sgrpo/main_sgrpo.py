@@ -61,6 +61,10 @@ def get_custom_reward_fn(config):
 
 @hydra.main(config_path="config", config_name="sgrpo_trainer", version_base=None)
 def main(config):
+    from hydra.core.hydra_config import HydraConfig
+    output_dir = HydraConfig.get().run.dir
+    config.data.output_dir = os.path.dirname(os.path.abspath(__file__)) + "/" + output_dir
+
     run_ppo(config)
 
 
@@ -161,7 +165,7 @@ class TaskRunner:
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
         from verl.utils.dataset.rl_dataset import collate_fn
-
+        
         train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
         val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
         train_sampler = create_rl_sampler(config.data, train_dataset)
