@@ -61,7 +61,6 @@ from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.async_server import AsyncLLMServerManager
 
-from verl.trainer.ppo.sampling_tree import print_tree
 
 WorkerType = Type[Worker]
 
@@ -884,7 +883,7 @@ class RayPPOTrainer:
         self.global_steps += 1
         last_val_metrics = None
 
-        from verl.trainer.ppo.sampling_tree import build_sampling_trees
+        from .sampling_tree import build_sampling_trees
 
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:

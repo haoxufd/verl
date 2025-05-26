@@ -3,12 +3,9 @@ import numpy as np
 import torch
 
 from verl import DataProto
-from verl.utils.reward_score.gsm8k_step_seperate import extract_solution as extract_solution_gsm8k
-
-from graphviz import Digraph
+from .reward_score.gsm8k_step_seperate import extract_solution as extract_solution_gsm8k
 
 import json
-import os
 from pathlib import Path
 from typing import Dict, Any
 
