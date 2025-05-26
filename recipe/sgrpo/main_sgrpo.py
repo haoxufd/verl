@@ -20,7 +20,7 @@ import os
 import hydra
 import ray
 
-from verl.trainer.ppo.sgrpo_ray_trainer import RayPPOTrainer
+from .sgrpo_ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
 
 
@@ -59,7 +59,7 @@ def get_custom_reward_fn(config):
     return wrapped_fn
 
 
-@hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
+@hydra.main(config_path="config", config_name="sgrpo_trainer", version_base=None)
 def main(config):
     run_ppo(config)
 
@@ -119,7 +119,7 @@ class TaskRunner:
         else:
             raise NotImplementedError
 
-        from verl.trainer.ppo.sgrpo_ray_trainer import ResourcePoolManager, Role
+        from .sgrpo_ray_trainer import ResourcePoolManager, Role
 
         role_worker_mapping = {
             Role.ActorRollout: ray.remote(actor_rollout_cls),

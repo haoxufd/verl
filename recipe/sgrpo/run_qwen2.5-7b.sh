@@ -3,7 +3,7 @@ set -x
 # If you are using vllm<=0.6.3, you might need to set the following environment variable to avoid bugs:
 # export VLLM_ATTENTION_BACKEND=XFORMERS
 
-python3 -m verl.trainer.main_ppo \
+python3 -m recipe.sgrpo.main_sgrpo \
     algorithm.adv_estimator=grpo \
     data.train_files=$HOME/data/gsm8k_deepseek/train.parquet \
     data.val_files=$HOME/data/gsm8k_deepseek/test.parquet \
@@ -33,7 +33,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.logger=['console','wandb'] \
+    trainer.logger=['console'] \
     trainer.project_name='step_wise_grpo' \
     trainer.experiment_name='grpo_qwen2.5_7b_gsm8k' \
     trainer.default_local_dir=$HOME/checkpoints/step_wise_grpo/grpo_qwen2.5_7b_gsm8k \
