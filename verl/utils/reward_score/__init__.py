@@ -16,7 +16,7 @@
 
 def _default_compute_score(data_source, solution_str, ground_truth, extra_info=None):
     if data_source == "openai/gsm8k":
-        from . import gsm8k
+        from recipe.sgrpo.reward_score import gsm8k_step_seperate as gsm8k
 
         res = gsm8k.compute_score(solution_str, ground_truth)
     elif data_source in ["lighteval/MATH", "DigitalLearningGmbH/MATH-lighteval"]:
