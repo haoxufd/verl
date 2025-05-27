@@ -224,8 +224,9 @@ trainer:
   experiment_name: gsm8k
   logger: [ 'console', 'wandb' ]
   log_val_generations: 0
-  rollout_data_dir: null # directory for logging the rollout data, no dump if null
-  validation_data_dir: null # directory for logging the validation data, no dump if null
+  output_rollout_data: False # directory for logging the rollout data, no dump if null
+  output_validation_data: True # directory for logging the validation data, no dump if null
+  output_sampling_tree: False # directory for logging the sampling tree, no dump if null
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1

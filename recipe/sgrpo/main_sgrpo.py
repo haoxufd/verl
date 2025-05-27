@@ -23,6 +23,8 @@ import ray
 from .sgrpo_ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
 
+from omegaconf import OmegaConf
+
 
 def get_custom_reward_fn(config):
     import importlib.util
@@ -63,7 +65,16 @@ def get_custom_reward_fn(config):
 def main(config):
     from hydra.core.hydra_config import HydraConfig
     output_dir = HydraConfig.get().run.dir
-    config.data.output_dir = os.path.dirname(os.path.abspath(__file__)) + "/" + output_dir
+
+    OmegaConf.set_struct(config, False)  # allow to modify config
+
+    config.data.output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), output_dir)
+    config.trainer.default_local_dir = os.path.join(config.data.output_dir, "checkpoints")
+    config.trainer.validation_data_dir = os.path.join(config.data.output_dir, "validation_data") if config.trainer.output_validation_data else None
+    config.trainer.sampling_tree_dir = os.path.join(config.data.output_dir, "sampling_tree") if config.trainer.output_sampling_tree else None
+    config.trainer.rollout_data_dir = os.path.join(config.data.output_dir, "rollout_data") if config.trainer.output_rollout_data else None
+
+    OmegaConf.save(config=config, f=os.path.join(config.data.output_dir, "config_dump.yaml"))
 
     run_ppo(config)
 
