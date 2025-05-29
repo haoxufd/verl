@@ -73,6 +73,12 @@
             stroke: #1976D2;
         }
         
+        .node.active circle {
+            stroke: #FF5722;
+            stroke-width: 3px;
+            filter: drop-shadow(0 0 8px rgba(255,87,34,0.6));
+        }
+        
         .node text {
             font-size: 11px;
             font-weight: 500;
@@ -110,7 +116,7 @@
             background: #1976D2;
         }
         
-        /* 增强的 Tooltip 样式 */
+        /* 修改后的 Tooltip 样式 - 现在是绝对定位相对于树容器 */
         .tooltip {
             position: absolute;
             background: linear-gradient(135deg, #2c3e50, #34495e);
@@ -118,12 +124,21 @@
             padding: 15px;
             border-radius: 8px;
             font-size: 12px;
-            pointer-events: none;
             z-index: 1000;
-            max-width: 400px;
-            min-width: 250px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            max-width: 350px;
+            min-width: 280px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.4);
             border: 1px solid #555;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.3s ease;
+            transform: translateY(-10px);
+        }
+        
+        .tooltip.show {
+            opacity: 1;
+            pointer-events: auto;
+            transform: translateY(0);
         }
         
         .tooltip-header {
@@ -133,6 +148,28 @@
             margin-bottom: 10px;
             padding-bottom: 5px;
             border-bottom: 1px solid #555;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .tooltip-close {
+            background: #e74c3c;
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            font-size: 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            line-height: 1;
+        }
+        
+        .tooltip-close:hover {
+            background: #c0392b;
         }
         
         .tooltip-section {
@@ -167,6 +204,8 @@
             padding: 8px;
             border-radius: 4px;
             border-left: 3px solid #3498db;
+            white-space: pre-wrap;
+            font-family: 'Courier New', monospace;
         }
         
         .tooltip-tokens {
@@ -176,6 +215,7 @@
             padding: 6px;
             border-radius: 4px;
             font-size: 10px;
+            font-family: 'Courier New', monospace;
         }
         
         /* 确保滚动条可见 */
@@ -224,8 +264,9 @@
         <div class="controls">
             <button class="btn" onclick="resetZoom()">重置缩放</button>
             <button class="btn" onclick="fitToContainer()">适应窗口</button>
+            <button class="btn" onclick="closeTooltip()">关闭信息面板</button>
             <span style="margin-left: 20px; color: #666; font-size: 12px;">
-                💡 将鼠标悬停在节点上查看详细信息
+                💡 点击节点查看详细信息
             </span>
         </div>
         <div class="tree-container" id="tree-container">
@@ -234,9 +275,12 @@
     </div>
 
     <script>
-        const treeData = {tree_json}
+        // 示例数据结构
+        const treeData = {tree_json};
+        
         let root = treeData.tree_data;
         const metaInfo = treeData.meta_info;
+        let currentActiveNode = null; // 跟踪当前活跃的节点
         
         // 动态计算容器尺寸
         function getContainerDimensions() {
@@ -287,6 +331,10 @@
             .scaleExtent([0.1, 3])
             .on("zoom", (event) => {
                 g.attr("transform", event.transform);
+                // 如果有激活的tooltip，需要更新其位置
+                if (currentActiveNode) {
+                    updateTooltipPosition(currentActiveNode);
+                }
             });
         
         svg.call(zoom);
@@ -317,44 +365,49 @@
             return { width: newWidth, height: newHeight };
         }
         
-        // 增强的 Tooltip
-        const tooltip = d3.select("body").append("div")
-            .attr("class", "tooltip")
-            .style("opacity", 0);
+        // 在树容器内创建tooltip
+        const tooltip = d3.select("#tree-container").append("div")
+            .attr("class", "tooltip");
         
-        // 处理特殊字符显示
+        // 修改后的文本格式化函数 - 让转义字符可见但不执行
         function formatTextForDisplay(text) {
             if (!text) return 'N/A';
             
-            // 将各种转义字符转换为可见字符
+            // 如果文本中包含的是实际的换行符、制表符等，将它们转换为可见的转义字符
+            // 如果文本中已经是 \n 这样的字符串，则保持不变
             return text
-                .replace(/\n/g, '\\n')      // 换行符显示为 \n
-                .replace(/\t/g, '\\t')      // 制表符显示为 \t
-                .replace(/\r/g, '\\r')      // 回车符显示为 \r
-                .replace(/\"/g, '\\"')      // 双引号显示为 \"
-                .replace(/\'/g, "\\'")      // 单引号显示为 \'
-                .replace(/\\/g, '\\\\');    // 反斜杠显示为 \\（注意：这个要放最后，避免影响前面的替换）
+                .replace(/\\/g, '\\\\')
+                .replace(/\n/g, '\\n')         // 换行符显示为 \n
+                .replace(/\t/g, '\\t')         // 制表符显示为 \t
+                .replace(/\r/g, '\\r')        // 回车符显示为 \r
         }
-        
-        // HTML转义函数
-        function escapeHtml(text) {
-            if (!text) return 'N/A';
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-        
-        // 格式化 tooltip 内容 - 使用安全的文本处理
+
+        // 格式化 tooltip 内容 - 点击版本
         function formatTooltipContent(d) {
             const data = d.data;
             
             // 创建tooltip容器
             const tooltipDiv = document.createElement('div');
             
-            // 创建各个部分
+            // 创建header部分，包含关闭按钮
             const header = document.createElement('div');
             header.className = 'tooltip-header';
-            header.textContent = data.name;
+            
+            const title = document.createElement('span');
+            title.textContent = data.name;
+            
+            const closeButton = document.createElement('button');
+            closeButton.className = 'tooltip-close';
+            closeButton.innerHTML = '×';
+            closeButton.type = 'button';
+            // 直接绑定事件处理器
+            closeButton.addEventListener('click', function(e) {
+                e.stopPropagation();
+                closeTooltip();
+            });
+            
+            header.appendChild(title);
+            header.appendChild(closeButton);
             tooltipDiv.appendChild(header);
             
             // 添加各个信息段
@@ -383,7 +436,7 @@
                 tooltipDiv.appendChild(sectionDiv);
             });
             
-            // Full Text 部分 - 特殊处理转义字符
+            // Full Text 部分 - 使用修改后的格式化函数
             const textSection = document.createElement('div');
             textSection.className = 'tooltip-section';
             
@@ -393,7 +446,7 @@
             
             const textValue = document.createElement('div');
             textValue.className = 'tooltip-text';
-            // 使用格式化函数处理特殊字符
+            // 使用修改后的格式化函数
             textValue.textContent = formatTextForDisplay(data.full_text);
             
             textSection.appendChild(textLabel);
@@ -416,54 +469,137 @@
             tokenSection.appendChild(tokenValue);
             tooltipDiv.appendChild(tokenSection);
             
-            return tooltipDiv.innerHTML;
+            return tooltipDiv;
         }
         
-        // 智能计算tooltip位置
-        function calculateTooltipPosition(event) {
-            const tooltip = document.querySelector('.tooltip');
-            if (!tooltip) return { left: event.pageX + 15, top: event.pageY - 15 };
+        // 获取节点在容器中的实际位置
+        function getNodePosition(d) {
+            // 获取当前的缩放变换
+            const transform = d3.zoomTransform(svg.node());
             
-            // 获取tooltip的尺寸（需要先设置内容）
-            const tooltipRect = tooltip.getBoundingClientRect();
-            const tooltipWidth = tooltipRect.width || 300; // 默认宽度
-            const tooltipHeight = tooltipRect.height || 400; // 默认高度
+            // 计算节点在变换后的位置
+            const x = (d.y + margin.left) * transform.k + transform.x;
+            const y = (d.x + margin.top) * transform.k + transform.y;
             
-            // 获取视窗尺寸
-            const viewportWidth = window.innerWidth;
-            const viewportHeight = window.innerHeight;
-            const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-            const scrollLeft = window.pageXOffset || document.documentElement.scrollLeft;
+            return { x, y };
+        }
+        
+        // 计算tooltip的最佳位置
+        function calculateTooltipPosition(nodePos, tooltipWidth, tooltipHeight) {
+            const container = document.getElementById('tree-container');
+            const containerRect = container.getBoundingClientRect();
+            const containerWidth = container.clientWidth;
+            const containerHeight = container.clientHeight;
             
-            // 鼠标相对于视窗的位置
-            const mouseX = event.clientX;
-            const mouseY = event.clientY;
+            let x, y;
+            const offset = 15; // 距离节点的偏移量
             
-            // 计算初始位置（鼠标右下方）
-            let left = event.pageX + 15;
-            let top = event.pageY - 15;
+            // 默认位置：节点右侧
+            x = nodePos.x + offset;
+            y = nodePos.y - tooltipHeight / 2;
             
-            // 检查右边界 - 如果超出右边，显示在鼠标左侧
-            if (mouseX + tooltipWidth + 15 > viewportWidth) {
-                left = event.pageX - tooltipWidth - 15;
+            // 检查右侧是否超出边界
+            if (x + tooltipWidth > containerWidth) {
+                // 尝试左侧
+                x = nodePos.x - tooltipWidth - offset;
             }
             
-            // 检查下边界 - 如果超出下边，调整到上方
-            if (mouseY + tooltipHeight + 15 > viewportHeight) {
-                top = event.pageY - tooltipHeight - 15;
+            // 检查左侧是否超出边界
+            if (x < 0) {
+                // 如果左右都不行，放在节点下方
+                x = nodePos.x - tooltipWidth / 2;
+                y = nodePos.y + offset;
+                
+                // 如果下方也超出，放在上方
+                if (y + tooltipHeight > containerHeight) {
+                    y = nodePos.y - tooltipHeight - offset;
+                }
             }
             
-            // 检查上边界 - 如果还是超出上边，强制在视窗内
-            if (top < scrollTop + 10) {
-                top = scrollTop + 10;
+            // 最终边界检查
+            x = Math.max(5, Math.min(x, containerWidth - tooltipWidth - 5));
+            y = Math.max(5, Math.min(y, containerHeight - tooltipHeight - 5));
+            
+            return { x, y };
+        }
+        
+        // 更新tooltip位置
+        function updateTooltipPosition(d) {
+            if (!tooltip.classed("show")) return;
+            
+            const nodePos = getNodePosition(d);
+            const tooltipNode = tooltip.node();
+            const tooltipRect = tooltipNode.getBoundingClientRect();
+            
+            const position = calculateTooltipPosition(
+                nodePos, 
+                tooltipRect.width || 350, 
+                tooltipRect.height || 400
+            );
+            
+            tooltip.style("left", position.x + "px")
+                   .style("top", position.y + "px");
+        }
+        
+        // 显示tooltip
+        function showTooltip(d, event) {
+            // 如果点击的是同一个节点，则关闭tooltip
+            if (currentActiveNode === d) {
+                closeTooltip();
+                return;
             }
             
-            // 检查左边界 - 如果超出左边，强制在视窗内
-            if (left < scrollLeft + 10) {
-                left = scrollLeft + 10;
+            // 关闭之前的tooltip并移除之前的高亮
+            if (currentActiveNode) {
+                removeActiveState(currentActiveNode);
             }
             
-            return { left, top };
+            // 设置新的活跃节点
+            currentActiveNode = d;
+            
+            // 添加活跃状态
+            addActiveState(d);
+            
+            // 创建tooltip内容并直接添加到DOM
+            const tooltipContent = formatTooltipContent(d);
+            tooltip.node().innerHTML = '';
+            tooltip.node().appendChild(tooltipContent);
+            
+            // 显示tooltip（先显示以获取尺寸）
+            tooltip.classed("show", true);
+            
+            // 计算并设置tooltip位置
+            setTimeout(() => {
+                updateTooltipPosition(d);
+            }, 0);
+            
+            // 高亮路径
+            highlightPath(d);
+        }
+        
+        // 关闭tooltip
+        function closeTooltip() {
+            tooltip.classed("show", false);
+            
+            if (currentActiveNode) {
+                removeActiveState(currentActiveNode);
+                currentActiveNode = null;
+            }
+            
+            // 移除高亮
+            removeHighlight();
+        }
+        
+        // 添加活跃状态
+        function addActiveState(node) {
+            g.selectAll('g.node')
+                .classed('active', d => d === node);
+        }
+        
+        // 移除活跃状态
+        function removeActiveState(node) {
+            g.selectAll('g.node')
+                .classed('active', false);
         }
         
         // 更新树
@@ -491,31 +627,11 @@
                     return classes;
                 })
                 .attr("transform", d => `translate(${source.y0},${source.x0})`)
-                .on('mouseover', (event, d) => {
-                    // 显示增强的 tooltip
-                    tooltip.transition().duration(200).style("opacity", 1);
-                    tooltip.html(formatTooltipContent(d));
-                    
-                    // 智能定位tooltip
-                    const position = calculateTooltipPosition(event);
-                    tooltip.style("left", position.left + "px")
-                           .style("top", position.top + "px");
-                    
-                    // 高亮当前节点的路径
-                    highlightPath(d);
-                })
-                .on('mousemove', (event, d) => {
-                    // 实时调整tooltip位置
-                    const position = calculateTooltipPosition(event);
-                    tooltip.style("left", position.left + "px")
-                           .style("top", position.top + "px");
-                })
-                .on('mouseout', () => {
-                    // 隐藏 tooltip
-                    tooltip.transition().duration(300).style("opacity", 0);
-                    
-                    // 移除高亮
-                    removeHighlight();
+                .on('click', (event, d) => {
+                    // 阻止事件冒泡
+                    event.stopPropagation();
+                    // 显示/隐藏 tooltip
+                    showTooltip(d, event);
                 });
             
             // 添加圆圈
@@ -601,19 +717,11 @@
             // 高亮连接线
             g.selectAll('path.link')
                 .classed('highlight', d => pathNodes.includes(d));
-            
-            // 高亮节点
-            g.selectAll('g.node circle')
-                .style('stroke-width', d => pathNodes.includes(d) ? '3px' : '2px')
-                .style('filter', d => pathNodes.includes(d) ? 'drop-shadow(0 0 6px rgba(255,87,34,0.6))' : 'none');
         }
         
         // 移除高亮
         function removeHighlight() {
             g.selectAll('path.link').classed('highlight', false);
-            g.selectAll('g.node circle')
-                .style('stroke-width', '2px')
-                .style('filter', 'none');
         }
         
         // 创建连接线
@@ -655,6 +763,17 @@
             );
         };
         
+        // 关闭tooltip的全局函数
+        window.closeTooltip = closeTooltip;
+        
+        // 点击空白区域关闭tooltip
+        document.addEventListener('click', (event) => {
+            // 如果点击的不是tooltip内部，则关闭tooltip
+            if (!event.target.closest('.tooltip') && !event.target.closest('.node')) {
+                closeTooltip();
+            }
+        });
+        
         // 窗口大小改变时重新调整
         window.addEventListener('resize', () => {
             setTimeout(() => {
@@ -665,6 +784,11 @@
                 margin = newDims.margin;
                 treemap.size([height, width]);
                 update(root);
+                
+                // 如果有活跃的tooltip，更新其位置
+                if (currentActiveNode) {
+                    updateTooltipPosition(currentActiveNode);
+                }
             }, 100);
         });
         
