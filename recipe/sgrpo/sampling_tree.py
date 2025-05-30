@@ -3,7 +3,7 @@ import numpy as np
 import torch
 
 from verl import DataProto
-from .reward_score.gsm8k_step_seperate import extract_solution as extract_solution_gsm8k
+from verl.utils.reward_score.gsm8k import compute_score
 
 import json
 from pathlib import Path
@@ -699,7 +699,7 @@ def build_sampling_trees(batch_dict, actor_rollout_wg, tokenizer, config):
 
 def compute_scores(node, final_answer):
     if node.is_leaf:
-        node.score = 1.0 if extract_solution_gsm8k(node.text) == final_answer else 0.0
+        node.score = compute_score(node.text, final_answer)
         return 1, node.score
     
     # Num of leaf nodes for each subtree

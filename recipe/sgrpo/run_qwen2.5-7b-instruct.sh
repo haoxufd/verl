@@ -5,10 +5,10 @@ set -x
 
 python3 -m recipe.sgrpo.main_sgrpo \
     algorithm.adv_estimator=grpo \
-    data.train_files=$HOME/data/gsm8k_step_seperate/train.parquet \
-    data.val_files=$HOME/data/gsm8k_step_seperate/test.parquet \
+    data.train_files=$HOME/data/gsm8k/train.parquet \
+    data.val_files=$HOME/data/gsm8k/test.parquet \
     data.train_batch_size=256 \
-    data.max_prompt_length=1325 \
+    data.max_prompt_length=1024 \
     data.max_response_length=1024 \
     data.filter_overlong_prompts=False \
     data.truncation='error' \
@@ -31,7 +31,7 @@ python3 -m recipe.sgrpo.main_sgrpo \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=1 \
     +actor_rollout_ref.rollout.order=5 \
-    +actor_rollout_ref.rollout.max_tree_depth=2 \
+    +actor_rollout_ref.rollout.max_tree_depth=1 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=False \
@@ -42,6 +42,6 @@ python3 -m recipe.sgrpo.main_sgrpo \
     trainer.resume_mode=disable \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
-    trainer.save_freq=20 \
+    trainer.save_freq=50 \
     trainer.test_freq=1 \
-    trainer.total_epochs=5 $@
+    trainer.total_epochs=10 $@

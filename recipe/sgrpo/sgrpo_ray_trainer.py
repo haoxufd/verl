@@ -907,6 +907,12 @@ class RayPPOTrainer:
                             if self.config.trainer.output_sampling_tree:
                                 step_dir = os.path.join(self.config.trainer.sampling_tree_dir, f"step_{self.global_steps}")
                                 sampling_tree.visualize(output_file=os.path.join(step_dir, f"tree_{i}.html"))
+                    
+                    if self.config.trainer.output_sampling_tree:
+                        with _timer("write sampling tree", timing_raw):
+                            for i, sampling_tree in enumerate(sampling_trees):
+                                step_dir = os.path.join(self.config.trainer.sampling_tree_dir, f"step_{self.global_steps}")
+                                sampling_tree.visualize(output_file=os.path.join(step_dir, f"tree_{i}.html"))
 
                     with _timer("collect batch", timing_raw):
                         batch_list = []
