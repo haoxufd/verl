@@ -909,18 +909,19 @@ class RayPPOTrainer:
                                 sampling_tree.visualize(output_file=os.path.join(step_dir, f"tree_{i}.html"))
                     
                     if self.config.trainer.output_sampling_tree:
-                        with _timer("write sampling tree", timing_raw):
+                        with _timer("write_sampling_tree", timing_raw):
                             for i, sampling_tree in enumerate(sampling_trees):
                                 step_dir = os.path.join(self.config.trainer.sampling_tree_dir, f"step_{self.global_steps}")
                                 sampling_tree.visualize(output_file=os.path.join(step_dir, f"tree_{i}.html"))
 
-                    with _timer("collect batch", timing_raw):
+                    with _timer("collect_batch", timing_raw):
                         batch_list = []
                         for sampling_tree in sampling_trees:
                             batch_list.append(sampling_tree.collect_batch_data())
                         batch = DataProto.concat(batch_list)
                         world_size = self.actor_rollout_wg.world_size
-                        batch.padding(world_size - (len(batch) % world_size), "last")
+                        if len(batch) % world_size != 0:
+                            batch.padding(world_size - (len(batch) % world_size), "last")
 
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.

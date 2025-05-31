@@ -172,8 +172,12 @@ class SamplingTree:
         prompt_length = len(prompt)
         prompt = to_fixed_length_tensor(prompt, self.max_prompt_length, self.tokenizer.pad_token_id, "left", torch.int32)
 
+        advantage_pieces = []
+        score_pieces = []
         for node in output_nodes:
             response.extend(node.token_sequence)
+            advantage_pieces.append([node.advantage] * len(node.token_sequence))
+            score_pieces.append([0 for _ in range(len(node.token_sequence) - 1)] + [node.score])
         response_length = len(response)
         response = to_fixed_length_tensor(response, self.max_response_length, self.tokenizer.pad_token_id, "right", torch.int32)
 
@@ -187,9 +191,12 @@ class SamplingTree:
 
         position_id = get_position_ids_from_attention_mask(attention_mask.reshape(1, -1)).reshape(-1)
 
-        advantage = to_fixed_length_tensor([node.advantage] * response_length, self.max_response_length, 0, "right", torch.float32)
-        score = to_fixed_length_tensor([node.score] * response_length, self.max_response_length, 0, "right", torch.float32)
-        reward = score
+        advantage = [adv_value for adv_piece in advantage_pieces for adv_value in adv_piece]
+        assert len(advantage) == response_length
+        advantage = to_fixed_length_tensor(advantage, self.max_response_length, 0, "right", torch.float32)
+        score = [score_value for score_piece in score_pieces for score_value in score_piece]
+        assert len(score) == response_length
+        score = to_fixed_length_tensor(score, self.max_response_length, 0, "right", torch.float32)
 
         return {
             "input_id": input_id,
@@ -201,7 +208,7 @@ class SamplingTree:
             "advantage": advantage,
             "return": advantage,
             "score": score,
-            "reward": reward
+            "reward": score
         }
   
     def collect_batch_data(self):
@@ -238,7 +245,8 @@ class SamplingTree:
             "advantages": [], 
             "returns": [],
             "token_level_scores": [],
-            "token_level_rewards": []}
+            "token_level_rewards": []
+        }
         
         batch_key_to_single_key = {
             "input_ids": "input_id",
