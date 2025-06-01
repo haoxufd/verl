@@ -315,8 +315,6 @@ class SamplingTree:
         # 3. 保存为HTML文件
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(html_content)
-        
-        print(f"可视化文件已保存为: {output_file}")
     
     def _tree_to_json(self) -> Dict[str, Any]:
         """将树结构转换为D3.js友好的JSON格式"""
