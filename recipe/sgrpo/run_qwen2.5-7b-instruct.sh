@@ -12,7 +12,6 @@ python3 -m recipe.sgrpo.main_sgrpo \
     data.max_response_length=1024 \
     data.filter_overlong_prompts=False \
     data.truncation='error' \
-    +data.step_split_str='\n\n' \
     actor_rollout_ref.model.path=$HOME/models/Qwen2.5-7B-Instruct \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -37,6 +36,7 @@ python3 -m recipe.sgrpo.main_sgrpo \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
+    trainer.step_split_str="'⇒'" \
     trainer.project_name='step_wise_grpo' \
     trainer.experiment_name='grpo_qwen2.5_7b_instruct_gsm8k' \
     trainer.resume_mode=disable \

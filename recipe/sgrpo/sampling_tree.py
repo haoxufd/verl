@@ -685,12 +685,10 @@ def build_sampling_trees(batch_dict, actor_rollout_wg, tokenizer, config):
         raw_responses = extract_raw_responses(responses, response_mask)
 
         paths = []
-        config.data.step_split_str = "\n\n"
         depths= [node.depth for node in all_target_nodes]
         for idx, raw_response in enumerate(raw_responses):
-            positions = find_step_split_token_positions(raw_response, tokenizer, config.data.step_split_str)
-            # Remove the last position since it is "\n\n<answer>VALUE<answer>"
-            positions = pick_split_token_positions(positions[:-1], config.actor_rollout_ref.rollout.max_tree_depth - depths[idx // num_to_be_added_paths])
+            positions = find_step_split_token_positions(raw_response, tokenizer, config.trainer.step_split_str)
+            positions = pick_split_token_positions(positions, config.actor_rollout_ref.rollout.max_tree_depth - depths[idx // num_to_be_added_paths])
             sequences = split_list_by_positions(raw_response, positions)
             texts = [tokenizer.decode(seq, skip_special_tokens=False) for seq in sequences]
             path = [Node(token_sequence=sequences[i], max_children=order, text=texts[i]) for i in range(len(sequences))]

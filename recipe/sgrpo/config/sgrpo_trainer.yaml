@@ -117,6 +117,8 @@ actor_rollout_ref:
     do_sample: True
     # number of responses (i.e. num sample times)
     n: 1 # > 1 for grpo
+    order: 5
+    max_tree_depth: 4
     engine_kwargs: # inference engine parameters
       swap_space: null # null means "use the engine default value" (usually 4 GB), setting it to, e.g., 32 means 32 GB
     val_kwargs:
@@ -224,7 +226,7 @@ trainer:
   experiment_name: gsm8k
   logger: [ 'console', 'wandb' ]
   log_val_generations: 0
-  output_rollout_data: False # directory for logging the rollout data, no dump if null
+  output_rollout_data: True # directory for logging the rollout data, no dump if null
   output_validation_data: True # directory for logging the validation data, no dump if null
   output_sampling_tree: False # directory for logging the sampling tree, no dump if null
   nnodes: 1
@@ -243,6 +245,7 @@ trainer:
   max_critic_ckpt_to_keep: null
   # The timeout for ray worker group to wait for the register center to be ready
   ray_wait_register_center_timeout: 300
+  step_split_str: '⇒'
 
 ray_init:
   num_cpus: null # `None` means using all CPUs, which might cause hang if limited in systems like SLURM. Please set to a number allowed then.
