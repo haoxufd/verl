@@ -35,7 +35,7 @@ python3 -m recipe.sgrpo.main_sgrpo \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.logger=['console', 'wandb'] \
+    trainer.logger=['console','wandb'] \
     trainer.step_split_str="'⇒'" \
     trainer.output_sampling_tree=True \
     trainer.output_rollout_data=False \
