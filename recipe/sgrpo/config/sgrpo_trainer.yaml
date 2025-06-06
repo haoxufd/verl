@@ -119,6 +119,7 @@ actor_rollout_ref:
     n: 1 # > 1 for grpo
     order: 5
     max_tree_depth: 4
+    prune_tree: True
     engine_kwargs: # inference engine parameters
       swap_space: null # null means "use the engine default value" (usually 4 GB), setting it to, e.g., 32 means 32 GB
     val_kwargs:

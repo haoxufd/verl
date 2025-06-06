@@ -883,7 +883,7 @@ class RayPPOTrainer:
         self.global_steps += 1
         last_val_metrics = None
 
-        from .sampling_tree import build_sampling_trees
+        from .sampling_tree import build_sampling_trees, build_pruned_sampling_trees
 
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
@@ -895,18 +895,18 @@ class RayPPOTrainer:
                 with _timer("step", timing_raw):
                     # generate a batch
                     with _timer("gen", timing_raw):
-                        sampling_trees = build_sampling_trees(batch_dict, self.actor_rollout_wg, self.tokenizer, self.config)
+                        if self.config.actor_rollout_ref.rollout.get("prune_tree", True):
+                            sampling_trees = build_pruned_sampling_trees(batch_dict, self.actor_rollout_wg, self.tokenizer, self.config)
+                        else:
+                            sampling_trees = build_sampling_trees(batch_dict, self.actor_rollout_wg, self.tokenizer, self.config)
                     
-                    with _timer("score", timing_raw):
-                        for sampling_tree in sampling_trees:
-                            sampling_tree.compute_scores()
-                    
-                    with _timer("adv", timing_raw):
+                    with _timer("score_and_adv", timing_raw):
                         for i, sampling_tree in enumerate(sampling_trees):
-                            sampling_tree.compute_advantages()
-                            if self.config.trainer.output_sampling_tree:
-                                step_dir = os.path.join(self.config.trainer.sampling_tree_dir, f"step_{self.global_steps}")
-                                sampling_tree.visualize(output_file=os.path.join(step_dir, f"tree_{i}.html"))
+                            if self.config.actor_rollout_ref.rollout.get("prune_tree", True):
+                                sampling_tree.compute_scores_and_advantages_pruned()
+                            else:
+                                sampling_tree.compute_scores()
+                                sampling_tree.compute_advantages()
                     
                     if self.config.trainer.output_sampling_tree:
                         with _timer("write_sampling_tree", timing_raw):
@@ -917,7 +917,7 @@ class RayPPOTrainer:
                     with _timer("collect_batch", timing_raw):
                         batch_list = []
                         for sampling_tree in sampling_trees:
-                            batch_list.append(sampling_tree.collect_batch_data())
+                            batch_list.append(sampling_tree.collect_batch_data_pruned() if self.config.actor_rollout_ref.rollout.get("prune_tree", True) else  sampling_tree.collect_batch_data())
                         batch = DataProto.concat(batch_list)
                         world_size = self.actor_rollout_wg.world_size
                         if len(batch) % world_size != 0:

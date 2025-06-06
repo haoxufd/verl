@@ -72,6 +72,11 @@
             fill: #2196F3;
             stroke: #1976D2;
         }
+
+        .node.first-incorrect circle {
+            fill: #FF5722;
+            stroke: #F44336;
+        }
         
         .node.active circle {
             stroke: #FF5722;
@@ -292,14 +297,14 @@
             };
         }
         
-        // 计算树的实际需要尺寸
+        // 计算树的实际需要尺寸（垂直布局）
         function calculateTreeDimensions(root) {
             const nodeCount = root.descendants().length;
             const maxDepth = root.height;
             
-            // 根据节点数量和深度计算合适的尺寸
-            const minWidth = Math.max(800, maxDepth * 250 + 400);
-            const minHeight = Math.max(600, nodeCount * 40 + 200);
+            // 根据节点数量和深度计算合适的尺寸（垂直布局）
+            const minWidth = Math.max(800, nodeCount * 60 + 400);
+            const minHeight = Math.max(600, maxDepth * 180 + 200);
             
             return { width: minWidth, height: minHeight };
         }
@@ -339,12 +344,12 @@
         
         svg.call(zoom);
         
-        // 树布局
-        let treemap = d3.tree().size([height, width]);
+        // 树布局（垂直布局：交换width和height）
+        let treemap = d3.tree().size([width, height]);
         
         // 创建根节点 - 所有节点都展开
         root = d3.hierarchy(root, d => d.children);
-        root.x0 = height / 2;
+        root.x0 = width / 2;
         root.y0 = 0;
         
         // 动态调整SVG尺寸
@@ -359,8 +364,8 @@
             svg.attr("width", newWidth + margin.left + margin.right)
                .attr("height", newHeight + margin.top + margin.bottom);
             
-            // 更新树布局尺寸
-            treemap.size([newHeight, newWidth]);
+            // 更新树布局尺寸（垂直布局）
+            treemap.size([newWidth, newHeight]);
             
             return { width: newWidth, height: newHeight };
         }
@@ -416,7 +421,8 @@
                 { label: 'Score', value: data.score },
                 { label: 'Advantage', value: data.advantage },
                 { label: 'Depth', value: data.depth },
-                { label: 'Children Count', value: data.children_count }
+                { label: 'Children Count', value: data.children_count },
+                { label: 'Is First Incorrect', value: data.is_first_incorrect }
             ];
             
             sections.forEach(section => {
@@ -472,14 +478,14 @@
             return tooltipDiv;
         }
         
-        // 获取节点在容器中的实际位置
+        // 获取节点在容器中的实际位置（垂直布局调整）
         function getNodePosition(d) {
             // 获取当前的缩放变换
             const transform = d3.zoomTransform(svg.node());
             
-            // 计算节点在变换后的位置
-            const x = (d.y + margin.left) * transform.k + transform.x;
-            const y = (d.x + margin.top) * transform.k + transform.y;
+            // 计算节点在变换后的位置（垂直布局：x和y对应关系调整）
+            const x = (d.x + margin.left) * transform.k + transform.x;
+            const y = (d.y + margin.top) * transform.k + transform.y;
             
             return { x, y };
         }
@@ -611,8 +617,8 @@
             const nodes = treeData.descendants();
             const links = treeData.descendants().slice(1);
             
-            // 标准化固定深度
-            nodes.forEach(d => { d.y = d.depth * 220; });
+            // 标准化固定深度（垂直布局：y轴表示深度）
+            nodes.forEach(d => { d.y = d.depth * 150; });
             
             // 更新节点
             const node = g.selectAll('g.node')
@@ -624,9 +630,10 @@
                     let classes = 'node';
                     if (d.data.is_root) classes += ' root';
                     if (d.data.is_leaf) classes += ' leaf';
+                    if (d.data.is_first_incorrect) classes += ' first-incorrect';
                     return classes;
                 })
-                .attr("transform", d => `translate(${source.y0},${source.x0})`)
+                .attr("transform", d => `translate(${source.x0},${source.y0})`)
                 .on('click', (event, d) => {
                     // 阻止事件冒泡
                     event.stopPropagation();
@@ -638,12 +645,12 @@
             nodeEnter.append('circle')
                 .attr('r', 1e-6);
             
-            // 更新节点
+            // 更新节点（垂直布局：x,y坐标直接使用d.x,d.y）
             const nodeUpdate = nodeEnter.merge(node);
             
             nodeUpdate.transition()
                 .duration(750)
-                .attr("transform", d => `translate(${d.y},${d.x})`);
+                .attr("transform", d => `translate(${d.x},${d.y})`);
             
             nodeUpdate.select('circle')
                 .transition()
@@ -663,7 +670,7 @@
             // 移除节点
             const nodeExit = node.exit().transition()
                 .duration(750)
-                .attr("transform", d => `translate(${source.y},${source.x})`)
+                .attr("transform", d => `translate(${source.x},${source.y})`)
                 .remove();
             
             nodeExit.select('circle')
@@ -724,12 +731,12 @@
             g.selectAll('path.link').classed('highlight', false);
         }
         
-        // 创建连接线
+        // 创建连接线（垂直布局：调整曲线方向）
         function diagonal(s, d) {
-            const path = `M ${s.y} ${s.x}
-                        C ${(s.y + d.y) / 2} ${s.x},
-                          ${(s.y + d.y) / 2} ${d.x},
-                          ${d.y} ${d.x}`;
+            const path = `M ${s.x} ${s.y}
+                        C ${s.x} ${(s.y + d.y) / 2},
+                          ${d.x} ${(s.y + d.y) / 2},
+                          ${d.x} ${d.y}`;
             return path;
         }
         
@@ -782,7 +789,7 @@
                 width = newDims.width;
                 height = newDims.height;
                 margin = newDims.margin;
-                treemap.size([height, width]);
+                treemap.size([width, height]); // 垂直布局
                 update(root);
                 
                 // 如果有活跃的tooltip，更新其位置

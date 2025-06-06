@@ -5,8 +5,8 @@ set -x
 
 python3 -m recipe.sgrpo.main_sgrpo \
     algorithm.adv_estimator=grpo \
-    data.train_files=$HOME/data/gsm8k/train.parquet \
-    data.val_files=$HOME/data/gsm8k/test.parquet \
+    data.train_files=$HOME/data/gsm8k_b/train50p_other.parquet \
+    data.val_files=$HOME/data/gsm8k_b/test.parquet \
     data.train_batch_size=256 \
     data.max_prompt_length=1024 \
     data.max_response_length=1024 \
@@ -15,7 +15,7 @@ python3 -m recipe.sgrpo.main_sgrpo \
     actor_rollout_ref.model.path=$HOME/models/Qwen2.5-7B-sft-a/global_step_56 \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=256 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=8 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
@@ -25,20 +25,23 @@ python3 -m recipe.sgrpo.main_sgrpo \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=32 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.order=5 \
-    actor_rollout_ref.rollout.max_tree_depth=1 \
+    actor_rollout_ref.rollout.prune_tree=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.logger=['console'] \
+    trainer.logger=['console', 'wandb'] \
     trainer.step_split_str="'⇒'" \
     trainer.output_sampling_tree=True \
-    trainer.project_name='step_wise_grpo' \
-    trainer.experiment_name='sgrpo_n5_d1_qwen2.5_7b_sft_gsm8k' \
+    trainer.output_rollout_data=False \
+    trainer.output_validation_data=True \
+    trainer.val_before_train=True \
+    trainer.project_name='step_wise_grpo_qwen2.5_7b_sft' \
+    trainer.experiment_name='sgrpo_n5_pruned_gsm8k' \
     trainer.resume_mode=disable \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
