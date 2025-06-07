@@ -1,3 +1,4 @@
+import html
 from platform import node
 import torch
 import numpy as np
@@ -18,11 +19,8 @@ import torch
 import numpy as np
 from collections import defaultdict
 
-from dataclasses import dataclass
-from typing import Generator, List, Tuple, Optional
-import torch
-import numpy as np
-from collections import defaultdict
+
+from pprint import pprint
 
 @dataclass
 class GenerationRequest:
@@ -86,8 +84,8 @@ def find_first_incorrect_step_generator(tree, nodes, l, r, tokenizer, config, gr
     path = mid_node.get_ancestors() + [mid_node]
     input_id = [token for node in path for token in node.token_sequence]
     raw_prompt_ids = np.array([input_id] * N, dtype='O')
-    input_id = [tokenizer.pad_token_id] * (config.data.max_prompt_length - len(input_id)) + input_id
-    input_ids = [input_id] * N
+    input_id = to_fixed_length_tensor(input_id, config.data.max_prompt_length, tokenizer.pad_token_id, "left", torch.int32)
+    input_ids = input_id.unsqueeze(0).repeat(N, 1)
     input_ids = torch.tensor(input_ids, dtype=torch.int32)
     attention_mask = (input_ids != tokenizer.pad_token_id).to(torch.int32)
     position_ids = get_position_ids_from_attention_mask(attention_mask)
@@ -211,19 +209,20 @@ def run_generators_in_parallel(generators: List[Generator]) -> Generator[List[Ge
 class ParallelIncorrectStepFinder:
     """并行执行多个sampling_tree的first incorrect step查找"""
     
-    def __init__(self, tokenizer, config, actor_rollout_wg):
+    def __init__(self, tokenizer, config, actor_rollout_wg, sampling_trees):
         self.tokenizer = tokenizer
         self.config = config
         self.actor_rollout_wg = actor_rollout_wg
+        self.sampling_trees = sampling_trees
     
-    def process_sampling_trees(self, sampling_trees):
+    def process_sampling_trees(self):
         """
         并行处理多个sampling_trees
         """
         # 创建所有任务的生成器
         generators = []
         
-        for tree_id, sampling_tree in enumerate(sampling_trees):
+        for tree_id, sampling_tree in enumerate(self.sampling_trees):
             leaf_nodes = [node for node in sampling_tree.all_nodes if node.is_leaf]
             uncorrect_leaf_nodes = [
                 node for node in leaf_nodes 
@@ -260,6 +259,7 @@ class ParallelIncorrectStepFinder:
             except StopIteration:
                 pass
         
+        iter = 0
         while pending_requests:
             # 批量处理所有待处理的请求
             requests = [req for _, _, req in pending_requests.values()]
@@ -267,6 +267,8 @@ class ParallelIncorrectStepFinder:
             if not requests:
                 break
             
+            for idx, sampling_tree in enumerate(self.sampling_trees):
+                sampling_tree.visualize(output_file=os.path.join(self.config.trainer.sampling_tree_dir, f"iter_{iter}/tree_{idx}.html"))
             # 批量生成
             responses = self._batch_generate(requests)
             
@@ -289,6 +291,8 @@ class ParallelIncorrectStepFinder:
             
             # 更新待处理请求
             pending_requests = {k: v for k, v in new_requests.items()}
+
+            iter += 1
     
     def _batch_generate(self, requests: List[GenerationRequest]) -> List[GenerationResponse]:
         """批量生成处理"""
@@ -301,6 +305,7 @@ class ParallelIncorrectStepFinder:
         all_position_ids = []
         all_raw_prompt_ids = []
         request_info = []
+        total_samples = 0
         
         for req in requests:
             batch_size = req.input_ids.shape[0]
@@ -309,6 +314,9 @@ class ParallelIncorrectStepFinder:
             all_position_ids.append(req.position_ids)
             all_raw_prompt_ids.extend(req.raw_prompt_ids)
             request_info.append((req, batch_size))
+            total_samples += batch_size
+        
+        pprint(f"[BatchGenerate] Processing {len(requests)} requests with {total_samples} total samples")
         
         # 合并为大batch
         batch_input_ids = torch.cat(all_input_ids, dim=0)
@@ -325,9 +333,11 @@ class ParallelIncorrectStepFinder:
         gen_batch = DataProto.from_single_dict(gen_batch_dict, auto_padding=True)
         
         # 执行批量生成
+        pprint(f"[BatchGenerate] Starting generation for batch size: {batch_input_ids.shape[0]}")
         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
         batch_responses = gen_batch_output.batch["responses"]
         batch_attention_mask_out = gen_batch_output.batch["attention_mask"]
+        pprint(f"[BatchGenerate] Generation completed, processing responses")
         
         # 分解结果
         responses = []
@@ -356,14 +366,15 @@ class ParallelIncorrectStepFinder:
             responses.append(response)
             start_idx = end_idx
         
+        pprint(f"[BatchGenerate] Completed processing {len(responses)} responses")
         return responses
 
 def parallel_process_sampling_trees(sampling_trees, tokenizer, config, actor_rollout_wg):
     """
     并行处理多个sampling_trees的入口函数
     """
-    finder = ParallelIncorrectStepFinder(tokenizer, config, actor_rollout_wg)
-    finder.process_sampling_trees(sampling_trees)
+    finder = ParallelIncorrectStepFinder(tokenizer, config, actor_rollout_wg, sampling_trees)
+    finder.process_sampling_trees()
 
 class ChildrenFullError(Exception):
     """

@@ -658,6 +658,7 @@
                 .attr('r', 10)
                 .style("fill", d => {
                     if (d.data.is_root) return "#FF9800";
+                    if (d.data.is_first_incorrect) return "#F44336";
                     if (d.data.is_leaf) return "#2196F3";
                     return "#4CAF50";
                 });
