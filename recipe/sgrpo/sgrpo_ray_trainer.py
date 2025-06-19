@@ -896,7 +896,7 @@ class RayPPOTrainer:
                     # generate a batch
                     with _timer("gen", timing_raw):
                         if self.config.actor_rollout_ref.rollout.get("prune_tree", True):
-                            sampling_trees = build_pruned_sampling_trees(batch_dict, self.actor_rollout_wg, self.tokenizer, self.config)
+                            sampling_trees = build_pruned_sampling_trees(batch_dict, self.actor_rollout_wg, self.tokenizer, self.config, self.global_steps)
                         else:
                             sampling_trees = build_sampling_trees(batch_dict, self.actor_rollout_wg, self.tokenizer, self.config)
                     

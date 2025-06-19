@@ -247,6 +247,8 @@ trainer:
   # The timeout for ray worker group to wait for the register center to be ready
   ray_wait_register_center_timeout: 300
   step_split_str: '⇒'
+  entropy_driven_step_split: False
+  top_n_entropy_tokens: 2
 
 ray_init:
   num_cpus: null # `None` means using all CPUs, which might cause hang if limited in systems like SLURM. Please set to a number allowed then.
