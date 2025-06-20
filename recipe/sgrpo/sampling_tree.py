@@ -166,20 +166,19 @@ class SamplingTree:
     
     def get_redundant_generation_input(self):
         input_ids = []
-        map_input_data_to_node = []
         leaf_nodes = [node for node in self.all_nodes if node.is_leaf]
         path_num = 0
         res = {}
         for leaf_node in leaf_nodes:
             if leaf_node.score == 1:
                 continue
-            path = leaf_node.get_ancestors()[1:]
+            path = leaf_node.get_ancestors()[1:] + [leaf_node]
             path_res = {}
             for node in path:
                 node_input_ids = [node.state[0]] * (self.order - 1)
-                input_ids.extend(node_input_ids)
                 path_res[node] = {"input_ids": node_input_ids}
-                map_input_data_to_node.extend([node] * (self.order - 1))
+                if not node.is_leaf:
+                    input_ids.extend(node_input_ids)
             res[f"path_{path_num}"] = path_res
             path_num += 1
         
@@ -234,11 +233,9 @@ class SamplingTree:
         prompt = to_fixed_length_tensor(prompt, self.max_prompt_length, self.tokenizer.pad_token_id, "left", torch.int32)
 
         advantage_pieces = []
-        score_pieces = []
         for node in output_nodes:
             response.extend(node.token_sequence)
             advantage_pieces.append([node.advantage if node.advantage is not None else 0] * len(node.token_sequence))
-            score_pieces.append([0 for _ in range(len(node.token_sequence) - 1)] + [node.score if node.score is not None else 0])
         response_length = len(response)
         response = to_fixed_length_tensor(response, self.max_response_length, self.tokenizer.pad_token_id, "right", torch.int32)
 
@@ -255,9 +252,6 @@ class SamplingTree:
         advantage = [adv_value for adv_piece in advantage_pieces for adv_value in adv_piece]
         assert len(advantage) == response_length
         advantage = to_fixed_length_tensor(advantage, self.max_response_length, 0, "right", torch.float32)
-        score = [score_value for score_piece in score_pieces for score_value in score_piece]
-        assert len(score) == response_length
-        score = to_fixed_length_tensor(score, self.max_response_length, 0, "right", torch.float32)
 
         return {
             "input_id": input_id,
@@ -267,9 +261,7 @@ class SamplingTree:
             "response": response,
             "response_mask": response_mask,
             "advantage": advantage,
-            "return": advantage,
-            "score": score,
-            "reward": score
+            "return": advantage
         }
   
     def collect_batch_data(self):
@@ -304,9 +296,7 @@ class SamplingTree:
             "responses": [], 
             "response_mask": [], 
             "advantages": [], 
-            "returns": [],
-            "token_level_scores": [],
-            "token_level_rewards": []
+            "returns": []
         }
         
         batch_key_to_single_key = {
@@ -317,9 +307,7 @@ class SamplingTree:
             "responses": "response",
             "response_mask": "response_mask",
             "advantages": "advantage",
-            "returns": "return",
-            "token_level_scores": "score",
-            "token_level_rewards": "reward"
+            "returns": "return"
         }
 
         for node in leaf_nodes:
@@ -366,9 +354,7 @@ class SamplingTree:
             "responses": [], 
             "response_mask": [], 
             "advantages": [], 
-            "returns": [],
-            "token_level_scores": [],
-            "token_level_rewards": []
+            "returns": []
         }
         
         batch_key_to_single_key = {
@@ -379,9 +365,7 @@ class SamplingTree:
             "responses": "response",
             "response_mask": "response_mask",
             "advantages": "advantage",
-            "returns": "return",
-            "token_level_scores": "score",
-            "token_level_rewards": "reward"
+            "returns": "return"
         }
 
         for input_nodes, output_nodes in input_output_pairs:
@@ -825,7 +809,6 @@ def find_first_incorrect_step_with_redundant_generation(sampling_trees: List[Sam
         input_ids, structure_tree_data = sampling_tree.get_redundant_generation_input()
         all_input_ids.extend(input_ids)
         all_structure_data[sampling_tree] = structure_tree_data
-    N = len(all_input_ids)
     
     gen_batch_output = generate(all_input_ids, tokenizer, actor_rollout_wg, config)
 
@@ -836,33 +819,30 @@ def find_first_incorrect_step_with_redundant_generation(sampling_trees: List[Sam
     cnt = 0
     for tree, structure_tree_data in all_structure_data.items():
         for path, structure_path_data in structure_tree_data.items():
-            node_idx = -1
+            node_idx = 0
             find_first_incorrect = False
             for node, structure_node_data in structure_path_data.items():
-                if not find_first_incorrect:
-                    node_idx += 1
+                is_first_incorrect = False
+                if not find_first_incorrect and node.is_leaf:
+                    is_first_incorrect = True
+                elif not find_first_incorrect and not node.is_leaf:
                     structure_node_data["prompt_plus_response_texts"] = prompt_texts[cnt * (order - 1) : (cnt + 1) * (order - 1)] + response_texts[cnt * (order - 1) : (cnt + 1) * (order - 1)]
                     scores = [compute_score(text, tree.final_answer) for text in structure_node_data["prompt_plus_response_texts"]]
-                    if all(score == 0 for score in scores):
-                        node.is_first_incorrect = True
-                        tree.first_incorrect_nodes.append(node)
-                        find_first_incorrect = True
-                        if node_idx > 0:
-                            paths = generate_paths(all_input_ids[(cnt - 1) * (order - 1) : (cnt) * (order - 1)], raw_responses[(cnt - 1) * (order - 1) : (cnt) * (order - 1)], gen_batch_output.batch["entropys"][(cnt - 1) * (order - 1) : (cnt) * (order - 1)], tokenizer, config, tree.final_answer, config.trainer.top_n_entropy_tokens - node.parent.depth)
-                            tree.add_paths(node.parent, paths)
-                            path_scores = [path[-1].score for path in paths]
-                            node.parent.path_scores = [0.0] + path_scores
-                cnt += 1
-            if not find_first_incorrect:
-                leaf_node = list(structure_path_data.keys())[-1]
-                leaf_node.is_first_incorrect = True
-                tree.first_incorrect_nodes.append(leaf_node)
-                find_first_incorrect = True
-                if node_idx > 0:
-                    paths = generate_paths(all_input_ids[(cnt - 2) * (order - 1) : (cnt - 1) * (order - 1)], raw_responses[(cnt - 2) * (order - 1) : (cnt - 1) * (order - 1)], gen_batch_output.batch["entropys"][(cnt - 2) * (order - 1) : (cnt - 1) * (order - 1)], tokenizer, config, tree.final_answer, config.trainer.top_n_entropy_tokens - leaf_node.parent.depth)
-                    tree.add_paths(leaf_node.parent, paths)
-                    path_scores = [path[-1].score for path in paths]
-                    leaf_node.parent.path_scores = [0.0] + path_scores
+                    is_first_incorrect = all(score == 0 for score in scores)
+
+                if is_first_incorrect:
+                    node.is_first_incorrect = True
+                    tree.first_incorrect_nodes.append(node)
+                    find_first_incorrect = True
+                    if node_idx > 0:
+                        paths = generate_paths(all_input_ids[(cnt - 1) * (order - 1) : (cnt) * (order - 1)], raw_responses[(cnt - 1) * (order - 1) : (cnt) * (order - 1)], gen_batch_output.batch["entropys"][(cnt - 1) * (order - 1) : (cnt) * (order - 1)], tokenizer, config, tree.final_answer, config.trainer.top_n_entropy_tokens - node.parent.depth)
+                        tree.add_paths(node.parent, paths)
+                        path_scores = [path[-1].score for path in paths]
+                        node.parent.path_scores = [0.0] + path_scores
+                
+                if not node.is_leaf:
+                    cnt += 1
+                node_idx += 1
 
     # After finding the first incorrect steps, we also need to evaluate the correctness of their brother nodes
     input_ids = []
@@ -1162,7 +1142,10 @@ def get_top_entropy_tokens_single(entropy, response, tokenizer, top_n=5):
     response_len = entropy.shape[0]
     
     # 获取 top_n 个最高 entropy 的索引
-    top_indices = torch.topk(entropy, min(top_n, response_len), dim=0)
+    try:
+        top_indices = torch.topk(entropy, min(top_n, response_len), dim=0)
+    except RuntimeError as e:
+        breakpoint()
     top_entropy_values = top_indices.values  # entropy 值
     top_positions = top_indices.indices      # 位置索引
     
@@ -1260,8 +1243,8 @@ def generate(input_ids, tokenizer, actor_rollout_wg, config):
 
 
 def generate_path(prompt, response, entropy, tokenizer, config, final_answer, top_n_entropy_tokens):
-    result = get_top_entropy_tokens_single(entropy, response, tokenizer, top_n_entropy_tokens + 2)
     if config.trainer.entropy_driven_step_split:
+        result = get_top_entropy_tokens_single(entropy, response, tokenizer, top_n_entropy_tokens + 2)
         positions = [item["position"] for item in result["top_entropy_tokens"]]
         positions = [position for position in positions if position > 0 and position < len(response)]
         positions = positions[:top_n_entropy_tokens]

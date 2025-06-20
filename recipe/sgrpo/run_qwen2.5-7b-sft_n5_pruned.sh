@@ -4,6 +4,7 @@ set -x
 # export VLLM_ATTENTION_BACKEND=XFORMERS
 
 python3 -m recipe.sgrpo.main_sgrpo \
+    hydra.run.dir=$HOME/verl/recipe/sgrpo/outputs/${now:%Y-%m-%d_%H-%M-%S} \
     algorithm.adv_estimator=grpo \
     data.train_files=$HOME/data/gsm8k_b/train50p_other.parquet \
     data.val_files=$HOME/data/gsm8k_b/test.parquet \
@@ -43,7 +44,7 @@ python3 -m recipe.sgrpo.main_sgrpo \
     trainer.output_validation_data=True \
     trainer.val_before_train=True \
     trainer.project_name='step_wise_grpo_qwen2.5_7b_sft' \
-    trainer.experiment_name='sgrpo_n5_d3_pruned_gsm8k' \
+    trainer.experiment_name='sgrpo_n5_pruned_gsm8k' \
     trainer.resume_mode=disable \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
