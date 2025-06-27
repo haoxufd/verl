@@ -69,6 +69,10 @@ def _compute_response_info(batch: DataProto) -> Dict[str, Any]:
     prompt_length = prompt_mask.sum(-1).float()
     response_length = response_mask.sum(-1).float()  # (batch_size,)
 
+    if "response_length" in batch.non_tensor_batch:
+        prompt_length = prompt_length - (torch.tensor(batch.non_tensor_batch["response_length"]) - response_length)
+        response_length = torch.tensor(batch.non_tensor_batch["response_length"])
+
     return dict(
         response_mask=response_mask,
         prompt_length=prompt_length,
@@ -106,6 +110,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
 
     prompt_mask = batch.batch["attention_mask"][:, :-max_response_length].bool()
     response_mask = batch.batch["attention_mask"][:, -max_response_length:].bool()
+    advantage_mask = batch.batch["advantage_mask"].bool()
 
     max_prompt_length = prompt_mask.size(-1)
 
@@ -113,8 +118,8 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
     prompt_length = response_info["prompt_length"]
     response_length = response_info["response_length"]
 
-    valid_adv = torch.masked_select(advantages, response_mask)
-    valid_returns = torch.masked_select(returns, response_mask)
+    valid_adv = torch.masked_select(advantages, advantage_mask)
+    valid_returns = torch.masked_select(returns, advantage_mask)
 
     if use_critic:
         values = batch.batch["values"]

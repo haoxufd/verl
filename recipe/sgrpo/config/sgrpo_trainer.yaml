@@ -104,7 +104,7 @@ actor_rollout_ref:
     free_cache_engine: True
     load_format: dummy_dtensor
     tensor_model_parallel_size: 2
-    max_num_batched_tokens: 8192
+    max_num_batched_tokens: 12288
     max_model_len: null
     max_num_seqs: 1024
     log_prob_micro_batch_size: null # will be deprecated, use log_prob_micro_batch_size_per_gpu
@@ -249,6 +249,7 @@ trainer:
   step_split_str: '⇒'
   entropy_driven_step_split: False
   top_n_entropy_tokens: 2
+  adjust_input: False
 
 ray_init:
   num_cpus: null # `None` means using all CPUs, which might cause hang if limited in systems like SLURM. Please set to a number allowed then.

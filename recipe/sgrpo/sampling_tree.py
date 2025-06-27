@@ -1,11 +1,10 @@
-from openai import responses
 import torch
 import numpy as np
 import torch
 from typing import Union, List
 
 from verl import DataProto
-from verl.utils.reward_score.gsm8k import compute_score
+from verl.utils.reward_score import _default_compute_score
 
 import json
 from pathlib import Path
@@ -13,37 +12,21 @@ from typing import Dict, Any
 
 import os
 
-from dataclasses import dataclass
 from typing import List, Tuple
 import torch
 import numpy as np
 
-@dataclass
-class GenerationRequest:
-    """单个生成请求"""
-    tree_id: int  # 标识是哪个sampling_tree
-    task_id: str  # 标识这是哪个具体的子任务
-    tree: 'SamplingTree'
-    nodes: List['Node']
-    l: int
-    r: int
-    m: int
-    mid_node: 'Node'
-    input_ids: torch.Tensor
-    attention_mask: torch.Tensor
-    position_ids: torch.Tensor
-    raw_prompt_ids: np.ndarray
-    ground_truth: str
-    N: int
+from pprint import pprint
+import numpy as np
+import torch
+from typing import Union, List
 
-@dataclass 
-class GenerationResponse:
-    """生成结果"""
-    request: GenerationRequest
-    responses: torch.Tensor
-    attention_mask: torch.Tensor
-    raw_responses: List[List[int]]
-    scores: List[float]
+from verl import DataProto
+import os
+
+from dataclasses import dataclass
+from typing import Generator, List, Tuple
+from typing import List, Tuple
 
 
 class ChildrenFullError(Exception):
@@ -82,7 +65,8 @@ class Node:
                  is_leaf=True,
                  text=None,
                  score=None,
-                 depth=0) -> None:
+                 depth=0,
+                 in_correct_path=None) -> None:
         self.children = [] if children is None else children
         self.parent = parent
         self.token_sequence = token_sequence
@@ -96,6 +80,7 @@ class Node:
         self.depth = depth
         self.is_first_incorrect = False
         self.state = (self.token_sequence, self.text) if self.is_root else None
+        self.in_correct_path = in_correct_path
     
     def add_child(self, child_node):
         # Check if the node can accept more children
@@ -199,19 +184,54 @@ class SamplingTree:
         for path in paths:
             self.add_path(node, path)
     
+    def _compute_scores(self, node):
+        if node.is_leaf:
+            node.score = compute_score(self.data_source, node.state[1], self.final_answer)
+            return 1, node.score
+
+        # Num of leaf nodes for each subtree
+        leaf_node_nums = []
+        # Total score of all leaf nodes for each subtree
+        scores = []
+        for child in node.children:
+            leaf_num, score = self._compute_scores(child)
+            leaf_node_nums.append(leaf_num)
+            scores.append(score)
+
+        node.score = sum(scores) / sum(leaf_node_nums)
+
+        return sum(leaf_node_nums), sum(scores)
+    
     def compute_scores(self):
         """
         Compute scores for all nodes in the tree.
         """
-        compute_scores(self.root, self.final_answer)
+        self._compute_scores(self.root)
+    
+    def _compute_advantages(self, node: Node):
+        if node.is_leaf:
+            return
+        
+        assert node.children_is_full
+
+        scores = np.array([_node.score for _node in node.children])
+        mean = np.mean(scores)
+        std = np.std(scores, ddof=1)
+        advantages = ((scores - mean) / (std + 1e-6)).tolist()
+
+        for i, child in enumerate(node.children):
+            child.advantage = advantages[i]
+        
+        for child in node.children:
+            self._compute_advantages(child)
         
     def compute_advantages(self):
         """
         Compute advantages for all nodes in the tree.
         """
-        compute_advantages(self.root)
+        self._compute_advantages(self.root)
     
-    def assemble_tensor_data(self, input_nodes, output_nodes):
+    def assemble_tensor_data(self, input_nodes, output_nodes, adjust_input=False):
         """
         Assemble tensor data based on input and output nodes. The input nodes are for the prompt part, and the output nodes are for the response part.
         This function processes the token sequences of the input and output nodes, constructs the input_id, attention_mask, response, response_mask and other necessary tensors for training.
@@ -227,15 +247,22 @@ class SamplingTree:
         response_mask = []
         prompt = []
 
-        for node in input_nodes:
-            prompt.extend(node.token_sequence)
+        for input_node in input_nodes:
+            input_node.advantage = None
+
+        if adjust_input:
+            for node in input_nodes:
+                prompt.extend(node.token_sequence)
+        else:
+            prompt = input_nodes[0].token_sequence
         prompt_length = len(prompt)
         prompt = to_fixed_length_tensor(prompt, self.max_prompt_length, self.tokenizer.pad_token_id, "left", torch.int32)
 
         advantage_pieces = []
-        for node in output_nodes:
+        target_output_nodes = output_nodes if adjust_input else input_nodes[1:] + output_nodes
+        for node in target_output_nodes:
             response.extend(node.token_sequence)
-            advantage_pieces.append([node.advantage if node.advantage is not None else 0] * len(node.token_sequence))
+            advantage_pieces.append([node.advantage if node.advantage is not None else 0.0] * len(node.token_sequence))
         response_length = len(response)
         response = to_fixed_length_tensor(response, self.max_response_length, self.tokenizer.pad_token_id, "right", torch.int32)
 
@@ -253,6 +280,14 @@ class SamplingTree:
         assert len(advantage) == response_length
         advantage = to_fixed_length_tensor(advantage, self.max_response_length, 0, "right", torch.float32)
 
+        advantage_mask = []
+        for target_output_node in target_output_nodes:
+            if target_output_node.advantage is not None:
+                advantage_mask.extend([1.0] * len(target_output_node.token_sequence))
+            else:
+                advantage_mask.extend([0.0] * len(target_output_node.token_sequence))
+        advantage_mask = to_fixed_length_tensor(advantage_mask, self.max_response_length, 0.0, "right", torch.float32)
+
         return {
             "input_id": input_id,
             "attention_mask": attention_mask,
@@ -261,10 +296,11 @@ class SamplingTree:
             "response": response,
             "response_mask": response_mask,
             "advantage": advantage,
-            "return": advantage
+            "return": advantage,
+            "advantage_mask": advantage_mask
         }
   
-    def collect_batch_data(self):
+    def collect_batch_data(self, adjust_input=False):
         """
         Collect batch data from the tree for training.
         After the tree is built and advantages and scores are computed, this function collects all the necessary tensors for training.
@@ -310,6 +346,8 @@ class SamplingTree:
             "returns": "return"
         }
 
+        input_output_pairs = []
+
         for node in leaf_nodes:
             path = node.get_ancestors() + [node]
             
@@ -322,30 +360,14 @@ class SamplingTree:
 
             input_nodes = path[:pos]
             output_nodes = path[pos:]
-
-            single_tensor_data = self.assemble_tensor_data(input_nodes, output_nodes)
-            for key in tensor_data.keys():
-                tensor_data[key].append(single_tensor_data[batch_key_to_single_key[key]])
+            input_output_pairs.append((input_nodes, output_nodes))
             
             for nd in path[pos:]:
                 visited[nd] = True
         
-        tensor_batch_dict = {}
-        for key in tensor_data.keys():
-            tensor_batch_dict[key] = torch.stack(tensor_data[key], dim=0)
-        
-        num_data = len(leaf_nodes)
-        non_tensor_batch_dict = {
-            "data_source": np.array([self.data_source] * num_data),
-            "ability": np.array([self.ability] * num_data),
-            "index": np.array([self.index] * num_data),
-            "reward_model": np.array([self.reward_model] * num_data),
-            "extra_info": np.array([self.extra_info] * num_data)
-        }
-        
-        return DataProto.from_single_dict({**tensor_batch_dict, **non_tensor_batch_dict})
+        return self.collect_batch_data_from_input_output_pairs(input_output_pairs, adjust_input)
     
-    def collect_batch_data_from_input_output_pairs(self, input_output_pairs: List[Tuple[Node, Node]]):
+    def collect_batch_data_from_input_output_pairs(self, input_output_pairs: List[Tuple[Node, Node]], adjust_input=False):
         tensor_data = {
             "input_ids": [], 
             "attention_mask": [], 
@@ -354,7 +376,8 @@ class SamplingTree:
             "responses": [], 
             "response_mask": [], 
             "advantages": [], 
-            "returns": []
+            "returns": [],
+            "advantage_mask": []
         }
         
         batch_key_to_single_key = {
@@ -365,11 +388,12 @@ class SamplingTree:
             "responses": "response",
             "response_mask": "response_mask",
             "advantages": "advantage",
-            "returns": "return"
+            "returns": "return",
+            "advantage_mask": "advantage_mask"
         }
 
         for input_nodes, output_nodes in input_output_pairs:
-            single_tensor_data = self.assemble_tensor_data(input_nodes, output_nodes)
+            single_tensor_data = self.assemble_tensor_data(input_nodes, output_nodes, adjust_input)
             for key in tensor_data.keys():
                 tensor_data[key].append(single_tensor_data[batch_key_to_single_key[key]])
         
@@ -385,10 +409,13 @@ class SamplingTree:
             "reward_model": np.array([self.reward_model] * num_data),
             "extra_info": np.array([self.extra_info] * num_data)
         }
+
+        if adjust_input:
+            non_tensor_batch_dict["response_length"] = np.array([len(output_nodes[-1].state[0]) - len(input_nodes[0].state[0]) for _, output_nodes in input_output_pairs])
         
         return DataProto.from_single_dict({**tensor_batch_dict, **non_tensor_batch_dict})
     
-    def compute_scores_and_advantages_pruned(self):
+    def compute_scores_pruned(self):
         filtered_first_incorrect_nodes = []
         parents_of_first_incorrect_nodes = []
         for first_incorrect_node in self.first_incorrect_nodes:
@@ -400,7 +427,15 @@ class SamplingTree:
             parent = first_incorrect_node.parent
             brothers_and_self = parent.children
             for node in brothers_and_self:
-                node.score = 0 if node.is_first_incorrect else 1
+                node.score = 0.0 if node.is_first_incorrect else 1.0
+    
+    def compute_advantages_pruned(self):
+        filtered_first_incorrect_nodes = []
+        parents_of_first_incorrect_nodes = []
+        for first_incorrect_node in self.first_incorrect_nodes:
+            if first_incorrect_node.parent not in parents_of_first_incorrect_nodes:
+                filtered_first_incorrect_nodes.append(first_incorrect_node)
+                parents_of_first_incorrect_nodes.append(first_incorrect_node.parent)
         
         for first_incorrect_node in filtered_first_incorrect_nodes:
             parent = first_incorrect_node.parent
@@ -410,7 +445,7 @@ class SamplingTree:
             mean = np.mean(scores)
             std = np.std(scores, ddof=1)
             # Here std cannot be 0 because self node is a first incorrect node and its score is 0.
-            # At the same time, there are at leat one correct node in its brother nodes, or its
+            # At the same time, there are at leat one correct node in its brother nodes, otherwise its
             # parent node would be an incorrect node ahead of it and it couldn't have become a first
             # incorrect node. This is why we don't need to add 1e-6 to std to avoid division by zero.
             advantages = ((scores - mean) / (std)).tolist()
@@ -446,13 +481,15 @@ class SamplingTree:
         
         return path
 
-    def collect_batch_data_pruned(self):
+    def collect_batch_data_pruned(self, adjust_input=False):
         filtered_first_incorrect_nodes = []
         parents_of_first_incorrect_nodes = []
+
         for first_incorrect_node in self.first_incorrect_nodes:
             if first_incorrect_node.parent not in parents_of_first_incorrect_nodes:
                 filtered_first_incorrect_nodes.append(first_incorrect_node)
                 parents_of_first_incorrect_nodes.append(first_incorrect_node.parent)
+
         input_and_output_pairs = []
         for first_incorrect_node in filtered_first_incorrect_nodes:
             parent = first_incorrect_node.parent
@@ -463,7 +500,8 @@ class SamplingTree:
             input_nodes = parent.get_ancestors() + [parent]
             for output_nodes in paths:
                 input_and_output_pairs.append((input_nodes, output_nodes))
-        return self.collect_batch_data_from_input_output_pairs(input_and_output_pairs)
+
+        return self.collect_batch_data_from_input_output_pairs(input_and_output_pairs, adjust_input)
 
     def visualize(self, output_file="tree_visualization.html", auto_open=True):
         """
@@ -561,6 +599,18 @@ class SamplingTree:
         html_content = template.replace('{tree_json}', tree_json)
         
         return html_content
+
+
+def compute_score(data_source: str, solution_str: str, ground_truth: str, extra_info=None):
+    score =  _default_compute_score(data_source, solution_str, ground_truth, extra_info)
+    if data_source == "openai/gsm8k":
+        pass
+    elif data_source == "math_dapo":
+        score = score["score"]
+    else:
+        raise NotImplementedError(f"Reward function is not implemented for {data_source=}")
+    
+    return score
 
 
 def build_sampling_trees(batch_dict, actor_rollout_wg, tokenizer, config):
@@ -675,7 +725,7 @@ def build_sampling_trees(batch_dict, actor_rollout_wg, tokenizer, config):
             filtered_sampling_trees = []
             for sampling_tree in sampling_trees:
                 leaf_nodes = [node for node in sampling_tree.all_nodes if node.is_leaf]
-                scores = [compute_score(node.text, sampling_tree.final_answer) for node in leaf_nodes]
+                scores = [compute_score(sampling_tree.data_source, node.state[1], sampling_tree.final_answer) for node in leaf_nodes]
                 if sum(scores) > 0 and sum(scores) < len(leaf_nodes):
                     filtered_sampling_trees.append(sampling_tree)
             sampling_trees = filtered_sampling_trees
@@ -686,7 +736,7 @@ def build_sampling_trees(batch_dict, actor_rollout_wg, tokenizer, config):
     return sampling_trees
 
 
-def build_pruned_sampling_trees(batch_dict, actor_rollout_wg, tokenizer, config, step):
+def build_pruned_sampling_trees(batch_dict, actor_rollout_wg, tokenizer, config):
     start_input_ids = batch_dict["raw_prompt_ids"]
     order = config.actor_rollout_ref.rollout.order
     question_num = len(start_input_ids)
@@ -704,12 +754,13 @@ def build_pruned_sampling_trees(batch_dict, actor_rollout_wg, tokenizer, config,
 
     sampling_trees = []
     for i in range(question_num):
-        text_responses = [tokenizer.decode(raw_response, skip_special_token=False) for raw_response in raw_responses[i * order: (i + 1) * order]]
-        scores = [compute_score(text, batch_dict["reward_model"][i]["ground_truth"]) for  text in text_responses]
+        text_responses = tokenizer.batch_decode(raw_responses[i * order: (i + 1) * order], skip_special_tokens=True)
+        scores = [compute_score(batch_dict["data_source"][i], text, batch_dict["reward_model"][i]["ground_truth"]) for text in text_responses]
+        breakpoint()
         if all([score == 0  for score in scores]) or all([score == 1  for score in scores]):
             continue
 
-        paths = generate_paths(input_ids[i * order: (i + 1) * order], raw_responses[i * order: (i + 1) * order], entropys[i * order: (i + 1) * order], tokenizer, config, batch_dict["reward_model"][i]["ground_truth"], config.trainer.top_n_entropy_tokens)
+        paths = generate_paths(batch_dict["data_source"][i], input_ids[i * order: (i + 1) * order], raw_responses[i * order: (i + 1) * order], entropys[i * order: (i + 1) * order], tokenizer, config, batch_dict["reward_model"][i]["ground_truth"], config.trainer.top_n_entropy_tokens)
         
         sampling_tree = SamplingTree(
                 root_nodes[i], 
@@ -732,72 +783,6 @@ def build_pruned_sampling_trees(batch_dict, actor_rollout_wg, tokenizer, config,
     find_first_incorrect_step_with_redundant_generation(sampling_trees, tokenizer, config, actor_rollout_wg)
 
     return sampling_trees
-
-
-
-    if r < l:
-        nodes[l].is_first_incorrect = True
-        tree.first_incorrect_nodes.append(nodes[l])
-        return
-    
-    m = (l + r) // 2
-    mid_node = nodes[m]
-    
-    N = config.actor_rollout_ref.rollout.order - 1
-
-    # sample starting from mid_node to get N samples
-    path = mid_node.get_ancestors() + [mid_node]
-    input_id = [token for node in path for token in node.token_sequence]
-    raw_prompt_ids = np.array([input_id] * N, dtype='O')
-    input_id = [tokenizer.pad_token_id] * (config.data.max_prompt_length - len(input_id)) + input_id
-    input_ids = [input_id] * N
-    input_ids = torch.tensor(input_ids, dtype=torch.int32)
-    attention_mask = (input_ids != tokenizer.pad_token_id).to(torch.int32)
-    position_ids = get_position_ids_from_attention_mask(attention_mask)
-    
-    gen_batch_dict = {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "position_ids": position_ids,
-        "raw_prompt_ids": raw_prompt_ids
-    }
-    gen_batch = DataProto.from_single_dict(gen_batch_dict, auto_padding=True)
-
-    gen_batch_output = actor_rollout_wg.generate_sequences(gen_batch)
-    responses = gen_batch_output.batch["responses"][: N, :]
-    attention_mask = gen_batch_output.batch["attention_mask"][: N, :]
-    response_mask = compute_response_mask(responses, attention_mask)
-    raw_responses = extract_raw_responses(responses, response_mask)
-
-    scores = [compute_score(tokenizer.decode(raw_response, skip_special_tokens=True), ground_truth) for raw_response in raw_responses]
-    all_incorrect = all(score == 0 for score in scores)
-    
-    if all_incorrect:
-        # If all responses are incorrect, then the first incorrect step should be this node or one of the nodes ahead of it
-        find_first_incorrect_step(tree, nodes, l, m - 1, tokenizer, config, actor_rollout_wg, ground_truth)
-    
-    # Add N paths to mid_node
-    paths = []
-    for raw_response in raw_responses:
-        positions = find_step_split_token_positions(raw_response, tokenizer, config.trainer.step_split_str)
-        sequences = split_list_by_positions(raw_response, positions)
-        texts = [tokenizer.decode(seq, skip_special_tokens=False) for seq in sequences]
-        path = [Node(token_sequence=sequences[i], max_children=config.actor_rollout_ref.rollout.order, text=texts[i]) for i in range(len(sequences))]
-        paths.append(path)
-    tree.add_paths(mid_node, paths)
-
-    # Get complete paths
-    paths = [nodes[:m + 1] + path for path in paths]
-    
-    # If only partial responses are right, we still consider this step is right, 
-    # but before we start to search for the first incorrect step in [m+1, r], we need to handle
-    # all the other incorrect responses. Specifically, we need to find the first incorrect steps in
-    # those new incorrect branches, to fully utilize the generated samples for advantage estimation.
-    for i, score in enumerate(scores):
-        if score == 0:
-            find_first_incorrect_step(tree, paths[i], m + 1, len(paths[i]) - 2, tokenizer, config, actor_rollout_wg, ground_truth)
-
-    find_first_incorrect_step(tree, nodes, m + 1, r, tokenizer, config, actor_rollout_wg, ground_truth)
 
 
 def find_first_incorrect_step_with_redundant_generation(sampling_trees: List[SamplingTree], tokenizer, config, actor_rollout_wg):
@@ -827,7 +812,7 @@ def find_first_incorrect_step_with_redundant_generation(sampling_trees: List[Sam
                     is_first_incorrect = True
                 elif not find_first_incorrect and not node.is_leaf:
                     structure_node_data["prompt_plus_response_texts"] = prompt_texts[cnt * (order - 1) : (cnt + 1) * (order - 1)] + response_texts[cnt * (order - 1) : (cnt + 1) * (order - 1)]
-                    scores = [compute_score(text, tree.final_answer) for text in structure_node_data["prompt_plus_response_texts"]]
+                    scores = [compute_score(tree.data_source, text, tree.final_answer) for text in structure_node_data["prompt_plus_response_texts"]]
                     is_first_incorrect = all(score == 0 for score in scores)
 
                 if is_first_incorrect:
@@ -835,7 +820,7 @@ def find_first_incorrect_step_with_redundant_generation(sampling_trees: List[Sam
                     tree.first_incorrect_nodes.append(node)
                     find_first_incorrect = True
                     if node_idx > 0:
-                        paths = generate_paths(all_input_ids[(cnt - 1) * (order - 1) : (cnt) * (order - 1)], raw_responses[(cnt - 1) * (order - 1) : (cnt) * (order - 1)], gen_batch_output.batch["entropys"][(cnt - 1) * (order - 1) : (cnt) * (order - 1)], tokenizer, config, tree.final_answer, config.trainer.top_n_entropy_tokens - node.parent.depth)
+                        paths = generate_paths(tree.data_source, all_input_ids[(cnt - 1) * (order - 1) : (cnt) * (order - 1)], raw_responses[(cnt - 1) * (order - 1) : (cnt) * (order - 1)], gen_batch_output.batch["entropys"][(cnt - 1) * (order - 1) : (cnt) * (order - 1)], tokenizer, config, tree.final_answer, config.trainer.top_n_entropy_tokens - node.parent.depth)
                         tree.add_paths(node.parent, paths)
                         path_scores = [path[-1].score for path in paths]
                         node.parent.path_scores = [0.0] + path_scores
@@ -870,7 +855,7 @@ def find_first_incorrect_step_with_redundant_generation(sampling_trees: List[Sam
     for sampling_tree, structure_tree_data in all_structure_data.items():
         for node, structure_node_data in structure_tree_data.items():
             structure_node_data["prompt_plus_response_texts"] = prompt_texts[cnt * (order - 1) : (cnt + 1) * (order - 1)] + response_texts[cnt * (order - 1) : (cnt + 1) * (order - 1)]
-            scores = [compute_score(text, sampling_tree.final_answer) for text in structure_node_data["prompt_plus_response_texts"]]
+            scores = [compute_score(tree.data_source, text, sampling_tree.final_answer) for text in structure_node_data["prompt_plus_response_texts"]]
             if all(score == 0 for score in scores):
                 node.is_first_incorrect = True
                 sampling_tree.first_incorrect_nodes.append(node)
@@ -880,7 +865,7 @@ def find_first_incorrect_step_with_redundant_generation(sampling_trees: List[Sam
 def to_fixed_length_tensor(
     seq: Union[List[int], List[List[int]]], 
     max_length: int, 
-    pad_token_id: int, 
+    pad_token_id: int | float, 
     pad_direction: str = 'right', 
     dtype: torch.dtype = torch.int32
 ) -> torch.Tensor:
@@ -969,10 +954,10 @@ def get_position_ids_from_attention_mask(attention_mask):
     return position_ids
 
 
-def generate_paths(prompts, raw_responses, entropys, tokenizer, config, final_answer, top_n_entropy_tokens):
+def generate_paths(data_source, prompts, raw_responses, entropys, tokenizer, config, final_answer, top_n_entropy_tokens):
     paths = []
     for i in range(len(raw_responses)):
-        paths.append(generate_path(prompts[i], raw_responses[i], entropys[i], tokenizer, config, final_answer, top_n_entropy_tokens))
+        paths.append(generate_path(data_source, prompts[i], raw_responses[i], entropys[i], tokenizer, config, final_answer, top_n_entropy_tokens))
     return paths
 
 
@@ -1142,10 +1127,7 @@ def get_top_entropy_tokens_single(entropy, response, tokenizer, top_n=5):
     response_len = entropy.shape[0]
     
     # 获取 top_n 个最高 entropy 的索引
-    try:
-        top_indices = torch.topk(entropy, min(top_n, response_len), dim=0)
-    except RuntimeError as e:
-        breakpoint()
+    top_indices = torch.topk(entropy, min(top_n, response_len), dim=0)
     top_entropy_values = top_indices.values  # entropy 值
     top_positions = top_indices.indices      # 位置索引
     
@@ -1242,7 +1224,7 @@ def generate(input_ids, tokenizer, actor_rollout_wg, config):
     return gen_batch_output
 
 
-def generate_path(prompt, response, entropy, tokenizer, config, final_answer, top_n_entropy_tokens):
+def generate_path(data_source, prompt, response, entropy, tokenizer, config, final_answer, top_n_entropy_tokens):
     if config.trainer.entropy_driven_step_split:
         result = get_top_entropy_tokens_single(entropy, response, tokenizer, top_n_entropy_tokens + 2)
         positions = [item["position"] for item in result["top_entropy_tokens"]]
@@ -1254,44 +1236,378 @@ def generate_path(prompt, response, entropy, tokenizer, config, final_answer, to
         positions = find_step_split_token_positions(response, tokenizer, config.trainer.step_split_str)
     sequences = split_list_by_positions(response, positions)
     texts = [tokenizer.decode(seq, skip_special_tokens=False) for seq in sequences]
-    path = [Node(token_sequence=sequences[i], max_children=config.actor_rollout_ref.rollout.order, text=texts[i]) for i in range(len(sequences))]
-    path[-1].score = compute_score(tokenizer.decode(prompt + response, skip_special_tokens=True), final_answer)
+    is_correct_response = compute_score(data_source, tokenizer.decode(prompt + response, skip_special_tokens=True), final_answer) == 1
+    path = [Node(token_sequence=sequences[i], max_children=config.actor_rollout_ref.rollout.order, text=texts[i], in_correct_path=is_correct_response) for i in range(len(sequences))]
+    path[-1].score = 1.0 if is_correct_response else 0.0
 
     return path
 
 
-def compute_scores(node, final_answer):
-    if node.is_leaf:
-        node.score = compute_score(node.text, final_answer)
-        return 1, node.score
+@dataclass
+class GenerationRequest:
+    """单个生成请求"""
+    task_id: str  # 标识这是哪个具体的子任务
+    input_ids: torch.Tensor
+    attention_mask: torch.Tensor
+    position_ids: torch.Tensor
+    raw_prompt_ids: np.ndarray
+
+@dataclass 
+class GenerationResponse:
+    """生成结果"""
+    request: GenerationRequest
+    responses: torch.Tensor
+    attention_mask: torch.Tensor
+    raw_responses: List[List[int]]
+    entropys: torch.Tensor
+
+def find_first_incorrect_step_generator(tree, nodes, l, r, tokenizer, config, task_prefix="") -> Generator[List[GenerationRequest], List[GenerationResponse], None]:
+    """
+    部分递归版本的find_first_incorrect_step生成器
+    - 对当前节点列表的搜索采用迭代
+    - 只对新采样的错误样本进行递归
+    - 添加递归深度控制
     
-    # Num of leaf nodes for each subtree
-    leaf_node_nums = []
-    # Total score of all leaf nodes for each subtree
-    scores = []
-    for child in node.children:
-        leaf_num, score = compute_scores(child, final_answer)
-        leaf_node_nums.append(leaf_num)
-        scores.append(score)
+    Args:
+        tree: SamplingTree
+        nodes: list[Node] 
+        l, r: 搜索范围
+        tokenizer: tokenizer
+        config: 配置
+        task_prefix: 任务前缀，用于生成唯一的task_id
     
-    node.score = sum(scores) / sum(leaf_node_nums)
+    Yields:
+        GenerationRequest: 需要进行生成的请求
+        
+    Receives:
+        GenerationResponse: 生成的结果
+    """
     
-    return sum(leaf_node_nums), sum(scores)
+    # 迭代搜索当前nodes中的first incorrect step
+    left, right = l, r
+    
+    while right >= left:
+        m = (left + right) // 2
+        mid_node = nodes[m]
+        
+        N = config.actor_rollout_ref.rollout.order - 1
+        
+        # 准备生成请求
+        input_id = mid_node.state[0]
+        raw_prompt_ids = np.array([input_id] * N, dtype='O')
+        input_id = to_fixed_length_tensor(input_id, config.data.max_prompt_length, tokenizer.pad_token_id, "left", torch.int32)
+        input_ids = input_id.unsqueeze(0).repeat(N, 1)
+        input_ids = torch.tensor(input_ids, dtype=torch.int32)
+        attention_mask = (input_ids != tokenizer.pad_token_id).to(torch.int32)
+        position_ids = get_position_ids_from_attention_mask(attention_mask)
+        
+        # 创建生成请求
+        task_id = f"{task_prefix}_{left}_{right}_{m}"
+        request = GenerationRequest(
+            task_id=task_id,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            raw_prompt_ids=raw_prompt_ids
+        )
+        
+        # yield请求并接收响应
+        responses = yield [request]
+        response = responses[0]
+        
+        # 处理响应
+        scores = [compute_score(tree.data_source, tokenizer.batch_decode(raw_prompt_ids[i] + response.raw_responses[i]), tree.final_answer) for i in range(len(response.raw_responses))]
+        raw_responses = response.raw_responses
+        all_incorrect = all(score == 0 for score in scores)
+        entropys = response.entropys
+        
+        if all_incorrect:
+            # 如果所有采样都是错误的，说明当前节点是错误的
+            # 继续在左半部分搜索
+            right = m - 1
+        else:
+            # 如果存在正确的采样，说明当前节点是正确的
+            paths = generate_paths(tree.data_source, input_ids, raw_responses, entropys, tokenizer, config, tree.final_answer, config.trainer.top_n_entropy_tokens - mid_node.depth)
+            tree.add_paths(mid_node, paths)
+            left = m + 1
+    
+    nodes[left].is_first_incorrect = True
+    # 判断第一个错误节点的兄弟节点是否正确，即兄弟节点是否也是第一个错误节点
+    brothers = nodes[left].parent.children[1:]
+    first_step_generators = []
+    for brother in brothers:
+        if brother.in_correct_path:
+            brother.is_first_incorrect = False
+        else:
+            first_step_generators.append(check_single_step_generator(
+                tree, brother, tokenizer, config, f"{task_prefix}_brother_{id(brother)}"
+            ))
+    
+    # 并行处理所有第一步检查
+    if first_step_generators:
+        yield from run_generators_in_parallel(first_step_generators)
+
+    tree.first_incorrect_nodes.append(nodes[left])
 
 
-def compute_advantages(node: Node):
-    if node.is_leaf:
+def check_single_step_generator(tree, node, tokenizer, config, task_prefix) -> Generator[List[GenerationRequest], List[GenerationResponse], None]:
+    """
+    检查单个步骤是否正确的生成器
+    
+    Args:
+        tree: SamplingTree
+        node: first_step 对应的 node
+        tokenizer: tokenizer
+        config: 配置
+        task_prefix: 任务前缀
+    """
+    N = config.actor_rollout_ref.rollout.order - 1
+    
+    # 准备生成请求
+    input_id = node.state[0]
+    raw_prompt_ids = np.array([input_id] * N, dtype='O')
+    input_id = to_fixed_length_tensor(input_id, config.data.max_prompt_length, tokenizer.pad_token_id, "left", torch.int32)
+    input_ids = input_id.unsqueeze(0).repeat(N, 1)
+    input_ids = torch.tensor(input_ids, dtype=torch.int32)
+    attention_mask = (input_ids != tokenizer.pad_token_id).to(torch.int32)
+    position_ids = get_position_ids_from_attention_mask(attention_mask)
+    
+    # 创建生成请求
+    task_id = f"{task_prefix}_check_node_{id(node)}"
+    request = GenerationRequest(
+        task_id=task_id,
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        raw_prompt_ids=raw_prompt_ids,
+    )
+    
+    # yield请求并接收响应
+    responses = yield [request]
+    response = responses[0]
+    full_texts = [tokenizer.batch_decode(raw_prompt_ids[i] + response.raw_responses[i]) for i in range(len(response.raw_responses))]
+    
+    # 处理响应
+    scores = [compute_score(tree.data_source, full_text, tree.final_answer) for full_text in full_texts]
+    all_incorrect = all(score == 0 for score in scores)
+    
+    if all_incorrect:
+        # 如果所有采样都是错误的，标记为first incorrect
+        node.is_first_incorrect = True
+        tree.first_incorrect_nodes.append(node)
+
+
+def run_generators_in_parallel(generators: List[Generator]) -> Generator[List[GenerationRequest], List[GenerationResponse], None]:
+    """
+    并行运行多个生成器
+    """
+    if not generators:
         return
     
-    assert node.children_is_full
-
-    scores = np.array([_node.score for _node in node.children])
-    mean = np.mean(scores)
-    std = np.std(scores, ddof=1)
-    advantages = ((scores - mean) / (std + 1e-6)).tolist()
-
-    for i, child in enumerate(node.children):
-        child.advantage = advantages[i]
+    active_generators = {i: gen for i, gen in enumerate(generators)}
+    pending_requests = {}
     
-    for child in node.children:
-        compute_advantages(child)
+    # 启动所有生成器
+    for i, gen in active_generators.items():
+        try:
+            requests = next(gen)
+            # 处理请求列表
+            for req in requests:
+                pending_requests[req.task_id] = (i, gen, req)
+        except StopIteration:
+            pass
+    
+    while pending_requests:
+        # 批量收集所有待处理的请求
+        requests = [req for _, _, req in pending_requests.values()]
+        
+        if requests:
+            # yield所有请求，等待批量响应
+            responses = yield requests
+            
+            # 将响应分发回对应的生成器
+            response_map = {resp.request.task_id: resp for resp in responses}
+            
+            for task_id, (gen_id, gen, _) in list(pending_requests.items()):
+                if task_id in response_map:
+                    response = response_map[task_id]
+                    del pending_requests[task_id]
+                    
+                    try:
+                        # 将响应发送给生成器，并获取下一个请求列表
+                        next_requests = gen.send([response])
+                        for req in next_requests:
+                            pending_requests[req.task_id] = (gen_id, gen, req)
+                    except StopIteration:
+                        # 该生成器已完成
+                        pass
+
+
+class ParallelIncorrectStepFinder:
+    """
+    并行查找多个采样树的第一个错误步骤
+    对于每个采样树的每个错误分支，通过二分法查找第一个错误步骤
+    由于每个错误分支的查找次数可能不同，因此使用生成器来处理
+    """
+    
+    def __init__(self, tokenizer, config, actor_rollout_wg, sampling_trees, step):
+        self.tokenizer = tokenizer
+        self.config = config
+        self.actor_rollout_wg = actor_rollout_wg
+        self.sampling_trees = sampling_trees
+        self.step = step
+    
+    def process_sampling_trees(self):
+        # 创建所有任务的生成器
+        generators = []
+        
+        for tree_id, sampling_tree in enumerate(self.sampling_trees):
+            leaf_nodes = [node for node in sampling_tree.all_nodes if node.is_leaf]
+            uncorrect_leaf_nodes = [
+                node for node in leaf_nodes 
+                if compute_score(sampling_tree.data_source, node.state[1], sampling_tree.final_answer) == 0
+            ]
+            
+            for leaf_idx, uncorrect_leaf_node in enumerate(uncorrect_leaf_nodes):
+                path = uncorrect_leaf_node.get_ancestors()[1:] + [uncorrect_leaf_node]
+                gen = find_first_incorrect_step_generator(
+                    sampling_tree, path, 0, len(path) - 2, 
+                    self.tokenizer, self.config, f"tree_{tree_id}_leaf_{leaf_idx}"
+                )
+                generators.append(gen)
+        
+        # 执行并行处理
+        self._execute_parallel_generators(generators)
+    
+    def _execute_parallel_generators(self, generators):
+        """执行并行生成器"""
+        if not generators:
+            return
+        
+        active_generators = {i: gen for i, gen in enumerate(generators)}
+        pending_requests = {}
+        
+        # 启动所有生成器
+        for i, gen in active_generators.items():
+            try:
+                requests = next(gen)
+                # 处理请求列表
+                for req in requests:
+                    pending_requests[req.task_id] = (i, gen, req)
+            except StopIteration:
+                pass
+        
+        iter = 0
+        while pending_requests:
+            # 批量处理所有待处理的请求
+            requests = [req for _, _, req in pending_requests.values()]
+            
+            if not requests:
+                break
+            
+            for idx, sampling_tree in enumerate(self.sampling_trees):
+                sampling_tree.visualize(output_file=os.path.join(self.config.trainer.sampling_tree_dir, f"step_{self.step}/iter_{iter}/tree_{idx}.html"))
+            # 批量生成
+            responses = self._batch_generate(requests)
+            
+            # 分发响应
+            completed_generators = set()
+            new_requests = {}
+            
+            response_map = {resp.request.task_id: resp for resp in responses}
+            
+            for task_id, (gen_id, gen, _) in list(pending_requests.items()):
+                if task_id in response_map:
+                    response = response_map[task_id]
+                    try:
+                        next_requests = gen.send([response])
+                        # 处理下一轮的请求列表
+                        for req in next_requests:
+                            new_requests[req.task_id] = (gen_id, gen, req)
+                    except StopIteration:
+                        completed_generators.add(gen_id)
+            
+            # 更新待处理请求
+            pending_requests = {k: v for k, v in new_requests.items()}
+
+            iter += 1
+    
+    def _batch_generate(self, requests: List[GenerationRequest]) -> List[GenerationResponse]:
+        """批量生成处理"""
+        if not requests:
+            return []
+        
+        # 合并所有输入
+        all_input_ids = []
+        all_attention_mask = []
+        all_position_ids = []
+        all_raw_prompt_ids = []
+        request_info = []
+        total_samples = 0
+        
+        for req in requests:
+            batch_size = req.input_ids.shape[0]
+            all_input_ids.append(req.input_ids)
+            all_attention_mask.append(req.attention_mask)
+            all_position_ids.append(req.position_ids)
+            all_raw_prompt_ids.extend(req.raw_prompt_ids)
+            request_info.append((req, batch_size))
+            total_samples += batch_size
+        
+        pprint(f"[BatchGenerate] Processing {len(requests)} requests with {total_samples} total samples")
+        
+        # 合并为大batch
+        batch_input_ids = torch.cat(all_input_ids, dim=0)
+        batch_attention_mask = torch.cat(all_attention_mask, dim=0)
+        batch_position_ids = torch.cat(all_position_ids, dim=0)
+        batch_raw_prompt_ids = np.array(all_raw_prompt_ids, dtype='O')
+        
+        gen_batch_dict = {
+            "input_ids": batch_input_ids,
+            "attention_mask": batch_attention_mask,
+            "position_ids": batch_position_ids,
+            "raw_prompt_ids": batch_raw_prompt_ids
+        }
+        gen_batch = DataProto.from_single_dict(gen_batch_dict, auto_padding=True)
+        
+        # 执行批量生成
+        pprint(f"[BatchGenerate] Starting generation for batch size: {batch_input_ids.shape[0]}")
+        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+        batch_responses = gen_batch_output.batch["responses"]
+        batch_entropys = self.actor_rollout_wg.compute_log_prob(gen_batch_output).batch["entropys"]
+        batch_attention_mask_out = gen_batch_output.batch["attention_mask"]
+        pprint(f"[BatchGenerate] Generation completed, processing responses")
+        
+        # 分解结果
+        responses = []
+        start_idx = 0
+        
+        for req, batch_size in request_info:
+            end_idx = start_idx + batch_size
+            
+            req_responses = batch_responses[start_idx:end_idx]
+            req_attention_mask = batch_attention_mask_out[start_idx:end_idx]
+            req_entropys = batch_entropys[start_idx:end_idx]
+            response_mask = compute_response_mask(req_responses, req_attention_mask)
+            raw_responses = extract_raw_responses(req_responses, response_mask)
+            
+            response = GenerationResponse(
+                request=req,
+                responses=req_responses,
+                attention_mask=req_attention_mask,
+                raw_responses=raw_responses,
+                entropys=req_entropys
+            )
+            responses.append(response)
+            start_idx = end_idx
+        
+        pprint(f"[BatchGenerate] Completed processing {len(responses)} responses")
+        return responses
+
+
+def find_first_incorrect_step_with_python_generator(sampling_trees, tokenizer, config, actor_rollout_wg, step):
+    """
+    并行处理多个sampling_trees的入口函数
+    """
+    finder = ParallelIncorrectStepFinder(tokenizer, config, actor_rollout_wg, sampling_trees, step)
+    finder.process_sampling_trees()

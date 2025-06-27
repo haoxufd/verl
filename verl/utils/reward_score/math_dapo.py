@@ -226,8 +226,8 @@ def verify(solution_str: str, answer: str, strict_box_verify: bool = False, paus
     Returns:
         True if the solution is correct, False otherwise
     """
-    if strict_box_verify:
-        correct, pred = is_correct_strict_box(solution_str, answer, pause_tokens_index)
+    correct, pred = is_correct_strict_box(solution_str, answer, pause_tokens_index)
+    if pred is not None:
         return correct == 1, pred
 
     correct, pred = is_correct_minerva(solution_str, answer)
@@ -257,11 +257,9 @@ def compute_score(
     # Verify the solution
     correct, pred = verify(solution_str, ground_truth, strict_box_verify, pause_tokens_index)
 
-    reward = 1.0 if correct else -1.0
+    reward = 1.0 if correct else 0
     acc = correct
 
     return {
-        "score": reward,
-        "acc": acc,
-        "pred": pred,
+        "score": reward
     }
