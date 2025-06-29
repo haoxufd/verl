@@ -78,7 +78,7 @@ class Node:
         self.score = score
         self.advantage = None
         self.depth = depth
-        self.is_first_incorrect = False
+        self.is_first_incorrect = None
         self.state = (self.token_sequence, self.text) if self.is_root else None
         self.in_correct_path = in_correct_path
     
@@ -603,12 +603,6 @@ class SamplingTree:
 
 def compute_score(data_source: str, solution_str: str, ground_truth: str, extra_info=None):
     score =  _default_compute_score(data_source, solution_str, ground_truth, extra_info)
-    if data_source == "openai/gsm8k":
-        pass
-    elif data_source == "math_dapo":
-        score = score["score"]
-    else:
-        raise NotImplementedError(f"Reward function is not implemented for {data_source=}")
     
     return score
 
@@ -748,15 +742,13 @@ def build_pruned_sampling_trees(batch_dict, actor_rollout_wg, tokenizer, config)
         input_ids.extend([root_node.token_sequence] * order)
 
     gen_batch_output = generate(input_ids, tokenizer, actor_rollout_wg, config)
-    log_prob = actor_rollout_wg.compute_log_prob(gen_batch_output)
-    entropys = log_prob.batch["entropys"]
+    entropys = actor_rollout_wg.compute_log_prob(gen_batch_output).batch["entropys"]
     raw_responses = gen_batch_output.non_tensor_batch["raw_responses"]
 
     sampling_trees = []
     for i in range(question_num):
         text_responses = tokenizer.batch_decode(raw_responses[i * order: (i + 1) * order], skip_special_tokens=True)
         scores = [compute_score(batch_dict["data_source"][i], text, batch_dict["reward_model"][i]["ground_truth"]) for text in text_responses]
-        breakpoint()
         if all([score == 0  for score in scores]) or all([score == 1  for score in scores]):
             continue
 
@@ -780,7 +772,11 @@ def build_pruned_sampling_trees(batch_dict, actor_rollout_wg, tokenizer, config)
         sampling_tree.root.path_scores = path_scores
         sampling_trees.append(sampling_tree)
 
-    find_first_incorrect_step_with_redundant_generation(sampling_trees, tokenizer, config, actor_rollout_wg)
+    finder_stype = config.actor_rollout_ref.rollout.finder_style
+    if finder_stype == "redundant":
+        find_first_incorrect_step_with_redundant_generation(sampling_trees, tokenizer, config, actor_rollout_wg)
+    elif finder_stype == "binary_search":
+        find_first_incorrect_step_with_python_generator(sampling_trees, tokenizer, config, actor_rollout_wg)
 
     return sampling_trees
 
@@ -796,6 +792,7 @@ def find_first_incorrect_step_with_redundant_generation(sampling_trees: List[Sam
         all_structure_data[sampling_tree] = structure_tree_data
     
     gen_batch_output = generate(all_input_ids, tokenizer, actor_rollout_wg, config)
+    entropys = actor_rollout_wg.compute_log_prob(gen_batch_output).batch["entropys"]
 
     raw_responses = gen_batch_output.non_tensor_batch["raw_responses"]
     response_texts = tokenizer.batch_decode(raw_responses.tolist(), skip_special_tokens=False)
@@ -820,7 +817,7 @@ def find_first_incorrect_step_with_redundant_generation(sampling_trees: List[Sam
                     tree.first_incorrect_nodes.append(node)
                     find_first_incorrect = True
                     if node_idx > 0:
-                        paths = generate_paths(tree.data_source, all_input_ids[(cnt - 1) * (order - 1) : (cnt) * (order - 1)], raw_responses[(cnt - 1) * (order - 1) : (cnt) * (order - 1)], gen_batch_output.batch["entropys"][(cnt - 1) * (order - 1) : (cnt) * (order - 1)], tokenizer, config, tree.final_answer, config.trainer.top_n_entropy_tokens - node.parent.depth)
+                        paths = generate_paths(tree.data_source, all_input_ids[(cnt - 1) * (order - 1) : (cnt) * (order - 1)], raw_responses[(cnt - 1) * (order - 1) : (cnt) * (order - 1)], entropys[(cnt - 1) * (order - 1) : (cnt) * (order - 1)], tokenizer, config, tree.final_answer, config.trainer.top_n_entropy_tokens - node.parent.depth)
                         tree.add_paths(node.parent, paths)
                         path_scores = [path[-1].score for path in paths]
                         node.parent.path_scores = [0.0] + path_scores
@@ -859,6 +856,8 @@ def find_first_incorrect_step_with_redundant_generation(sampling_trees: List[Sam
             if all(score == 0 for score in scores):
                 node.is_first_incorrect = True
                 sampling_tree.first_incorrect_nodes.append(node)
+            else:
+                node.is_first_incorrect = False
             cnt += 1
 
 
@@ -961,7 +960,7 @@ def generate_paths(data_source, prompts, raw_responses, entropys, tokenizer, con
     return paths
 
 
-def extract_raw_responses(responses, response_mask):
+def extract_raw_responses(responses: torch.Tensor, response_mask: torch.Tensor) -> np.ndarray:
     """
     Extract elements from responses where the corresponding mask value is 1.
     
@@ -974,17 +973,16 @@ def extract_raw_responses(responses, response_mask):
                       at positions where response_mask is 1
     """
     # Convert tensors to CPU and numpy if they're on GPU
-    if isinstance(responses, torch.Tensor):
-        responses = responses.cpu().numpy()
-        response_mask = response_mask.cpu().numpy()
+    np_responses = responses.cpu().numpy()
+    np_response_mask = response_mask.cpu().numpy()
     
-    batch_size = responses.shape[0]
+    batch_size = np_responses.shape[0]
     raw_responses = []
     
     for i in range(batch_size):
         # Extract values where mask is 1
-        valid_indices = response_mask[i] == 1
-        raw_response = responses[i][valid_indices].tolist()
+        valid_indices = np_response_mask[i] == 1
+        raw_response = np_responses[i][valid_indices].tolist()
         raw_responses.append(raw_response)
     
     return np.array(raw_responses, dtype='O')
@@ -1213,8 +1211,6 @@ def generate(input_ids, tokenizer, actor_rollout_wg, config):
     world_size = actor_rollout_wg.world_size
     if len(gen_batch_output) % world_size != 0:
         gen_batch_output.padding(world_size - (len(gen_batch_output) % world_size), "last")
-    entropys = actor_rollout_wg.compute_log_prob(gen_batch_output).batch["entropys"]
-    gen_batch_output.batch["entropys"] = entropys
     
     gen_batch_output = gen_batch_output[:batch_size]
     response_mask = compute_response_mask(gen_batch_output.batch["responses"], gen_batch_output.batch["attention_mask"])
@@ -1225,6 +1221,11 @@ def generate(input_ids, tokenizer, actor_rollout_wg, config):
 
 
 def generate_path(data_source, prompt, response, entropy, tokenizer, config, final_answer, top_n_entropy_tokens):
+    if not isinstance(prompt, list):
+        prompt = prompt.tolist()
+    if not isinstance(response, list):
+        response = response.tolist()
+
     if config.trainer.entropy_driven_step_split:
         result = get_top_entropy_tokens_single(entropy, response, tokenizer, top_n_entropy_tokens + 2)
         positions = [item["position"] for item in result["top_entropy_tokens"]]
@@ -1258,7 +1259,7 @@ class GenerationResponse:
     request: GenerationRequest
     responses: torch.Tensor
     attention_mask: torch.Tensor
-    raw_responses: List[List[int]]
+    raw_responses: np.ndarray
     entropys: torch.Tensor
 
 def find_first_incorrect_step_generator(tree, nodes, l, r, tokenizer, config, task_prefix="") -> Generator[List[GenerationRequest], List[GenerationResponse], None]:
@@ -1316,7 +1317,7 @@ def find_first_incorrect_step_generator(tree, nodes, l, r, tokenizer, config, ta
         response = responses[0]
         
         # 处理响应
-        scores = [compute_score(tree.data_source, tokenizer.batch_decode(raw_prompt_ids[i] + response.raw_responses[i]), tree.final_answer) for i in range(len(response.raw_responses))]
+        scores = [compute_score(tree.data_source, tokenizer.decode(raw_prompt_ids[i].tolist() + response.raw_responses[i]), tree.final_answer) for i in range(len(response.raw_responses))]
         raw_responses = response.raw_responses
         all_incorrect = all(score == 0 for score in scores)
         entropys = response.entropys
@@ -1327,16 +1328,23 @@ def find_first_incorrect_step_generator(tree, nodes, l, r, tokenizer, config, ta
             right = m - 1
         else:
             # 如果存在正确的采样，说明当前节点是正确的
-            paths = generate_paths(tree.data_source, input_ids, raw_responses, entropys, tokenizer, config, tree.final_answer, config.trainer.top_n_entropy_tokens - mid_node.depth)
+            paths = generate_paths(tree.data_source, raw_prompt_ids, raw_responses, entropys, tokenizer, config, tree.final_answer, config.trainer.top_n_entropy_tokens - mid_node.depth)
             tree.add_paths(mid_node, paths)
             left = m + 1
     
     nodes[left].is_first_incorrect = True
+    for node in nodes[left].get_ancestors()[1:]:
+        node.is_first_incorrect = False
+
     # 判断第一个错误节点的兄弟节点是否正确，即兄弟节点是否也是第一个错误节点
-    brothers = nodes[left].parent.children[1:]
+    brothers = []
+    for node in nodes[left].parent.children:
+        if node is not nodes[left]:
+            brothers.append(node)
+            
     first_step_generators = []
     for brother in brothers:
-        if brother.in_correct_path:
+        if brother.in_correct_path or brother.is_first_incorrect == False:
             brother.is_first_incorrect = False
         else:
             first_step_generators.append(check_single_step_generator(
@@ -1385,7 +1393,7 @@ def check_single_step_generator(tree, node, tokenizer, config, task_prefix) -> G
     # yield请求并接收响应
     responses = yield [request]
     response = responses[0]
-    full_texts = [tokenizer.batch_decode(raw_prompt_ids[i] + response.raw_responses[i]) for i in range(len(response.raw_responses))]
+    full_texts = [tokenizer.decode(raw_prompt_ids[i].tolist() if not isinstance(raw_prompt_ids[i], list) else  + response.raw_responses[i].tolist() if not isinstance(response.raw_responses[i], list) else response.raw_responses[i]) for i in range(len(response.raw_responses))]
     
     # 处理响应
     scores = [compute_score(tree.data_source, full_text, tree.final_answer) for full_text in full_texts]
@@ -1450,12 +1458,11 @@ class ParallelIncorrectStepFinder:
     由于每个错误分支的查找次数可能不同，因此使用生成器来处理
     """
     
-    def __init__(self, tokenizer, config, actor_rollout_wg, sampling_trees, step):
+    def __init__(self, tokenizer, config, actor_rollout_wg, sampling_trees):
         self.tokenizer = tokenizer
         self.config = config
         self.actor_rollout_wg = actor_rollout_wg
         self.sampling_trees = sampling_trees
-        self.step = step
     
     def process_sampling_trees(self):
         # 创建所有任务的生成器
@@ -1481,6 +1488,35 @@ class ParallelIncorrectStepFinder:
     
     def _execute_parallel_generators(self, generators):
         """执行并行生成器"""
+
+        import re
+        def get_next_step_dir(base_dir):
+            # 正则匹配 step_数字 的模式
+            step_pattern = re.compile(r"^step_(\d+)$")
+            max_step = 0
+
+            # If base_dir does not exist, create it
+            if not os.path.exists(base_dir):
+                os.makedirs(base_dir)
+
+            # 遍历目录，查找符合模式的子目录
+            for name in os.listdir(base_dir):
+                full_path = os.path.join(base_dir, name)
+                if os.path.isdir(full_path):
+                    match = step_pattern.match(name)
+                    if match:
+                        step_num = int(match.group(1))
+                        max_step = max(max_step, step_num)
+
+            # 计算下一个 step 编号
+            next_step = max_step + 1
+            next_dir_name = f"step_{next_step}"
+            next_dir_path = os.path.join(base_dir, next_dir_name)
+
+            return next_dir_path
+
+        next_step_dir = get_next_step_dir(self.config.trainer.sampling_tree_dir)
+
         if not generators:
             return
         
@@ -1506,7 +1542,8 @@ class ParallelIncorrectStepFinder:
                 break
             
             for idx, sampling_tree in enumerate(self.sampling_trees):
-                sampling_tree.visualize(output_file=os.path.join(self.config.trainer.sampling_tree_dir, f"step_{self.step}/iter_{iter}/tree_{idx}.html"))
+                sampling_tree.visualize(output_file=os.path.join(next_step_dir, f"iter_{iter}/tree_{idx}.html"))
+
             # 批量生成
             responses = self._batch_generate(requests)
             
@@ -1605,9 +1642,9 @@ class ParallelIncorrectStepFinder:
         return responses
 
 
-def find_first_incorrect_step_with_python_generator(sampling_trees, tokenizer, config, actor_rollout_wg, step):
+def find_first_incorrect_step_with_python_generator(sampling_trees, tokenizer, config, actor_rollout_wg):
     """
     并行处理多个sampling_trees的入口函数
     """
-    finder = ParallelIncorrectStepFinder(tokenizer, config, actor_rollout_wg, sampling_trees, step)
+    finder = ParallelIncorrectStepFinder(tokenizer, config, actor_rollout_wg, sampling_trees)
     finder.process_sampling_trees()

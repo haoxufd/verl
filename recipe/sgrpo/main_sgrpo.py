@@ -15,6 +15,7 @@
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
 
+from ctypes import addressof
 import os
 
 import hydra
@@ -83,8 +84,18 @@ def run_ppo(config) -> None:
     if not ray.is_initialized():
         # this is for local ray cluster
         ray.init(
-            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN"}},
-            num_cpus=config.ray_init.num_cpus,
+            runtime_env={
+                "env_vars": {
+                    "TOKENIZERS_PARALLELISM": "true", 
+                    "NCCL_DEBUG": "INFO", 
+                    "VLLM_LOGGING_LEVEL": "WARN", 
+                    "NCCL_SOCKET_IFNAME": "ib1",
+                    # "NCCL_IB_HCA": "mlx5_1",
+                    # "NCCL_IB_DISABLE": "1",
+                    # "NCCL_PROTO": "simple"
+                }
+            },
+            address="auto"
         )
 
     runner = TaskRunner.remote()
@@ -113,6 +124,8 @@ class TaskRunner:
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         processor = hf_processor(local_path, use_fast=True)  # used for multimodal LLM, could be none
+
+        assert processor is None
 
         # define worker classes
         if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:

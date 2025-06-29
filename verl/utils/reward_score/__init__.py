@@ -30,10 +30,25 @@ def _default_compute_score(data_source, solution_str, ground_truth, extra_info=N
 
         # from . import math_verify
         # res = math_verify.compute_score(solution_str, ground_truth)
-    elif data_source == "math_dapo" or data_source.startswith("aime"):
+    elif data_source in ("math_dapo", "HuggingFaceH4/aime_2024", "yentinglin/aime_2025", "knoveleng/AMC-23", "HuggingFaceH4/MATH-500", "math-ai/minervamath", "realtreetune/olympiadbench"):
         from . import math_dapo
+        from . import math
+        from . import prime_math
 
-        res = math_dapo.compute_score(solution_str, ground_truth)
+        res = math_dapo.compute_score(solution_str, ground_truth, True)
+        if res == 1.0:
+            return res
+        
+        res = math.compute_score(solution_str, ground_truth)
+        if res == 1.0:
+            return res
+        
+        res, _, _ = prime_math.compute_score(solution_str, ground_truth)
+        if res:
+            return 1.0
+        else:
+            return 0.0
+
     elif data_source in [
         "numina_aops_forum",
         "numina_synthetic_math",

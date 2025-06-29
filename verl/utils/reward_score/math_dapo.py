@@ -214,20 +214,23 @@ def is_correct_strict_box(pred: str, gt: str, pause_tokens_index: Optional[list[
     return 1 if (extracted_pred == gt) else -1, extracted_pred
 
 
-def verify(solution_str: str, answer: str, strict_box_verify: bool = False, pause_tokens_index: Optional[list[int]] = None) -> bool:
+def verify(solution_str: str,
+           answer: str,
+           strict_box_verify: bool = False,
+           pause_tokens_index: Optional[list[int]] = None) -> bool:
     """Verify if the solution is correct.
-
+    
     Args:
         solution_str: The solution string to verify
         answer: The ground truth answer
         strict_box_verify: Whether to use strict box verification
         pause_tokens_index: Indices of pause tokens
-
+        
     Returns:
         True if the solution is correct, False otherwise
     """
-    correct, pred = is_correct_strict_box(solution_str, answer, pause_tokens_index)
-    if pred is not None:
+    if strict_box_verify:
+        correct, pred = is_correct_strict_box(solution_str, answer, pause_tokens_index)
         return correct == 1, pred
 
     correct, pred = is_correct_minerva(solution_str, answer)
@@ -260,6 +263,4 @@ def compute_score(
     reward = 1.0 if correct else 0
     acc = correct
 
-    return {
-        "score": reward
-    }
+    return reward
