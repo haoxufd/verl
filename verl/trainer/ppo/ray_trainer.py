@@ -62,6 +62,8 @@ from verl.utils.seqlen_balancing import (
 )
 from verl.utils.tracking import ValidationGenerationsLogger
 
+import json
+
 WorkerType = Type[Worker]
 
 
@@ -459,6 +461,7 @@ class RayPPOTrainer(object):
             return_raw_chat=self.config.data.get("return_raw_chat", False),
             truncation=self.config.data.get("truncation", "error"),
             filter_overlong_prompts=self.config.data.filter_overlong_prompts,
+            enable_thinking=self.config.actor_rollout_ref.rollout.get("enable_thinking", False),
         )
         assert self.train_dataset.truncation == self.config.data.get("truncation", "error"), (
             f"dataset truncation {self.train_dataset.truncation} must be the same as config {self.config.data.get('truncation', 'error')}"
@@ -633,6 +636,17 @@ class RayPPOTrainer(object):
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
+        # dump generations
+        val_data_dir = self.config.trainer.get("validation_data_dir", None)
+        if val_data_dir:
+            self._dump_generations(
+                inputs=sample_inputs,
+                outputs=sample_outputs,
+                scores=sample_scores,
+                reward_extra_infos_dict=reward_extra_infos_dict,
+                dump_path=val_data_dir,
+            )
+
         for key_info, lst in reward_extra_infos_dict.items():
             assert len(lst) == 0 or len(lst) == len(sample_scores), (f"{key_info}: {len(lst)=}, {len(sample_scores)=}")
 
@@ -729,6 +743,30 @@ class RayPPOTrainer(object):
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg["actor_rollout"]
         self.actor_rollout_wg.init_model()
+    
+    def _dump_generations(self, inputs, outputs, scores, reward_extra_infos_dict, dump_path):
+        """Dump rollout/validation samples as JSONL."""
+        os.makedirs(dump_path, exist_ok=True)
+        filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
+
+        n = len(inputs)
+        base_data = {
+            "input": inputs,
+            "output": outputs,
+            "score": scores,
+            "step": [self.global_steps] * n,
+        }
+
+        for k, v in reward_extra_infos_dict.items():
+            if len(v) == n:
+                base_data[k] = v
+
+        with open(filename, "w") as f:
+            for i in range(n):
+                entry = {k: v[i] for k, v in base_data.items()}
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+        print(f"Dumped generations to {filename}")
 
     def _save_checkpoint(self):
         # path: given_path + `/global_step_{global_steps}` + `/actor`
@@ -961,6 +999,7 @@ class RayPPOTrainer(object):
                         interleave=True,
                     )
                     batch = batch.union(gen_batch_output)
+                    
 
                     batch.batch["response_mask"] = compute_response_mask(batch)
                     # balance the number of valid tokens on each dp rank.

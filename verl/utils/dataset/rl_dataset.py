@@ -89,7 +89,8 @@ class RLHFDataset(Dataset):
                  chat_template_func=None,
                  return_raw_chat=False,
                  truncation='error',
-                 filter_overlong_prompts=False):
+                 filter_overlong_prompts=False,
+                 enable_thinking=False):
         if not isinstance(parquet_files, (List, ListConfig)):
             parquet_files = [parquet_files]
 
@@ -108,6 +109,8 @@ class RLHFDataset(Dataset):
         self.chat_template_func = chat_template_func
         self.truncation = truncation
         self.filter_overlong_prompts = filter_overlong_prompts
+
+        self.enable_thinking = enable_thinking
 
         # whether to store the dataset in state_dict()
         # default not store
@@ -161,7 +164,7 @@ class RLHFDataset(Dataset):
 
         chat = row_dict.pop(self.prompt_key)
 
-        prompt_with_chat_template = self.tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
+        prompt_with_chat_template = self.tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False, enable_thinking=self.enable_thinking)
 
         is_multi_modal = self.image_key in row_dict
         if is_multi_modal:  # expand image token

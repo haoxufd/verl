@@ -154,6 +154,23 @@ class ActorRolloutRefWorker(Worker):
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, MixedPrecision, CPUOffload
         from torch import optim
 
+        import psutil
+        import socket
+        def get_interface_ip(interface_name):
+            try:
+                addrs = psutil.net_if_addrs()
+                if interface_name in addrs:
+                    for addr in addrs[interface_name]:
+                        if addr.family == socket.AF_INET:  # IPv4地址
+                            return addr.address
+                return None
+            except Exception as e:
+                print(f"错误: {e}")
+                return None
+        import time
+        import sys
+        ip = get_interface_ip('lan0')
+
         assert role in ['actor', 'ref']
 
         log_gpu_memory_usage('Before init from HF AutoModel', logger=logger)
@@ -455,9 +472,8 @@ class ActorRolloutRefWorker(Worker):
                 metrics = self.actor.update_policy(data=data)
             delta_time = timer.last
             global_num_tokens = data.meta_info['global_token_num']
-            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
-            metrics[
-                'perf/mfu/actor'] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
+            # estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
+            # metrics['perf/mfu/actor'] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
             metrics['perf/max_memory_allocated_gb'] = torch.cuda.max_memory_allocated() / (1024**3)
             metrics['perf/max_memory_reserved_gb'] = torch.cuda.max_memory_reserved() / (1024**3)
             metrics['perf/cpu_memory_used_gb'] = psutil.virtual_memory().used / (1024**3)
@@ -522,6 +538,46 @@ class ActorRolloutRefWorker(Worker):
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def generate_sequences_naive(self, prompts: DataProto):
+        # Support all hardwares
+        prompts = prompts.to(torch.cuda.current_device())
+
+        assert self._is_rollout
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+
+        meta_info = {
+            'eos_token_id':
+                self.generation_config.eos_token_id
+                if self.generation_config is not None else self.tokenizer.eos_token_id,
+            'pad_token_id':
+                self.generation_config.pad_token_id
+                if self.generation_config is not None else self.tokenizer.pad_token_id,
+        }
+        prompts.meta_info.update(meta_info)
+        with self.rollout_sharding_manager:
+
+            # after parameters sync with rollout, offload actor model to CPU
+            if self._is_offload_param:
+                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+            if self._is_offload_optimizer:
+                offload_fsdp_optimizer(optimizer=self.actor_optimizer)
+
+            log_gpu_memory_usage('After entering rollout sharding manager', logger=logger)
+
+            prompts = self.rollout_sharding_manager.preprocess_data(prompts)
+            output = self.rollout.generate_sequences_naive(prompts=prompts)
+            log_gpu_memory_usage('After rollout generation', logger=logger)
+
+            output = self.rollout_sharding_manager.postprocess_data(output)
+
+        output = output.to('cpu')
+
+        # clear kv cache
+        log_gpu_memory_usage('After recompute log prob', logger=logger)
+        return output
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob(self, data: DataProto):
         assert self._is_actor
         if self._is_offload_param:
@@ -537,12 +593,14 @@ class ActorRolloutRefWorker(Worker):
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
-            output = self.actor.compute_log_prob(data=data)
-            output = DataProto.from_dict(tensors={'old_log_probs': output},
-                                         meta_info={'temperature': self.config.rollout.temperature})
+            output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+            output = DataProto.from_dict(
+                tensors={"old_log_probs": output, "entropys": entropys},
+                meta_info={"temperature": self.config.rollout.temperature},
+            )
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
-        output = output.to('cpu')
+        output = output.to("cpu")
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module
@@ -569,7 +627,7 @@ class ActorRolloutRefWorker(Worker):
         data.meta_info['use_dynamic_bsz'] = self.config.ref.log_prob_use_dynamic_bsz
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
-            output = self.ref_policy.compute_log_prob(data=data)
+            output, _ = self.ref_policy.compute_log_prob(data=data)
             output = DataProto.from_dict(tensors={'ref_log_prob': output})
             output = self.ulysses_sharding_manager.postprocess_data(output)
 

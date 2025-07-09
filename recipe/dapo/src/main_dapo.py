@@ -51,6 +51,25 @@ def get_custom_reward_fn(config):
 
 @hydra.main(config_path='config', config_name='dapo_trainer', version_base=None)
 def main(config):
+    from hydra.core.hydra_config import HydraConfig
+    from omegaconf import OmegaConf
+
+    output_dir = HydraConfig.get().run.dir
+
+    OmegaConf.set_struct(config, False)  # allow to modify config
+
+    config.data.output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), output_dir)
+    # config.trainer.default_local_dir = os.path.join(config.data.output_dir, "checkpoints")
+    config.trainer.validation_data_dir = os.path.join(config.data.output_dir, "validation_data") if config.trainer.output_validation_data else None
+    config.trainer.sampling_tree_dir = os.path.join(config.data.output_dir, "sampling_tree") if config.trainer.output_sampling_tree else None
+    # config.trainer.rollout_data_dir = os.path.join(config.data.output_dir, "rollout_data") if config.trainer.output_rollout_data else None
+
+    # if config.data.output_dir doesn't exist, create it
+    if not os.path.exists(config.data.output_dir):
+        os.makedirs(config.data.output_dir, exist_ok=True)
+        
+    OmegaConf.save(config=config, f=os.path.join(config.data.output_dir, "config_dump.yaml"))
+
     run_ppo(config)
 
 
@@ -60,13 +79,24 @@ def run_ppo(config) -> None:
     os.environ["ENSURE_CUDA_VISIBLE_DEVICES"] = os.environ.get('CUDA_VISIBLE_DEVICES', '')
     if not ray.is_initialized():
         # this is for local ray cluster
-        ray.init(runtime_env={
-            'env_vars': {
-                'TOKENIZERS_PARALLELISM': 'true',
-                'NCCL_DEBUG': 'WARN',
-                'VLLM_LOGGING_LEVEL': 'WARN'
-            }
-        })
+        ray.init(
+            runtime_env={
+                'env_vars': {
+                    'TOKENIZERS_PARALLELISM': 'true',
+                    'NCCL_DEBUG': 'WARN',
+                    "NCCL_SOCKET_IFNAME": "ib0,ib1",
+                    "NCCL_IB_DISABLE": "1",
+                    "NCCL_IB_HCA": "mlx5_0,mlx5_1",
+                    # "NCCL_IB_GID_INDEX": "0",
+                    'VLLM_LOGGING_LEVEL': 'WARN',
+                    "VLLM_USE_V1": "0",
+                    "VLLM_ATTENTION_BACKEND": "XFORMERS",
+                    "RAY_DEBUG": "1",
+                    # "NCCL_DEBUG_SUBSYS": "ALL"
+                }
+            },
+            address="auto"
+        )
 
     runner = TaskRunner.remote()
     ray.get(runner.run.remote(config))
@@ -169,6 +199,7 @@ class TaskRunner:
                                        overlong_buffer_cfg=config.reward_model.overlong_buffer)
 
         # Note that we always use function-based RM for validation
+        # from verl.utils.reward_score import sgrpo_eval_compute_score
         val_reward_fn = reward_manager_cls(tokenizer=tokenizer,
                                            num_examine=1,
                                            compute_score=compute_score,

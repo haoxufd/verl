@@ -46,14 +46,13 @@ def _compute_response_info(batch: DataProto) -> Dict[str, Any]:
         response_length=response_length,
     )
 
-
 def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str, Any]:
     # TODO: add response length
     sequence_score = batch.batch["token_level_scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
 
-    advantages = batch.batch["advantages"]
-    returns = batch.batch["returns"]
+    # advantages = batch.batch["advantages"]
+    # returns = batch.batch["returns"]
 
     max_response_length = batch.batch["responses"].shape[-1]
 
@@ -66,14 +65,14 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
     prompt_length = response_info["prompt_length"]
     response_length = response_info["response_length"]
 
-    valid_adv = torch.masked_select(advantages, response_mask)
-    valid_returns = torch.masked_select(returns, response_mask)
+    # valid_adv = torch.masked_select(advantages, response_mask)
+    # valid_returns = torch.masked_select(returns, response_mask)
 
-    if use_critic:
-        values = batch.batch["values"]
-        valid_values = torch.masked_select(values, response_mask)
-        return_diff_var = torch.var(valid_returns - valid_values)
-        return_var = torch.var(valid_returns)
+    # if use_critic:
+    #     values = batch.batch["values"]
+    #     valid_values = torch.masked_select(values, response_mask)
+    #     return_diff_var = torch.var(valid_returns - valid_values)
+    #     return_var = torch.var(valid_returns)
 
     metrics = {
         # score
@@ -90,20 +89,20 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
             torch.max(sequence_reward).detach().item(),
         "critic/rewards/min":
             torch.min(sequence_reward).detach().item(),
-        # adv
-        "critic/advantages/mean":
-            torch.mean(valid_adv).detach().item(),
-        "critic/advantages/max":
-            torch.max(valid_adv).detach().item(),
-        "critic/advantages/min":
-            torch.min(valid_adv).detach().item(),
-        # returns
-        "critic/returns/mean":
-            torch.mean(valid_returns).detach().item(),
-        "critic/returns/max":
-            torch.max(valid_returns).detach().item(),
-        "critic/returns/min":
-            torch.min(valid_returns).detach().item(),
+        # # adv
+        # "critic/advantages/mean":
+        #     torch.mean(valid_adv).detach().item(),
+        # "critic/advantages/max":
+        #     torch.max(valid_adv).detach().item(),
+        # "critic/advantages/min":
+        #     torch.min(valid_adv).detach().item(),
+        # # returns
+        # "critic/returns/mean":
+        #     torch.mean(valid_returns).detach().item(),
+        # "critic/returns/max":
+        #     torch.max(valid_returns).detach().item(),
+        # "critic/returns/min":
+        #     torch.min(valid_returns).detach().item(),
         **({
             # values
             "critic/values/mean": torch.mean(valid_values).detach().item(),
@@ -130,31 +129,32 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
             torch.min(prompt_length).detach().item(),
         "prompt_length/clip_ratio":
             torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
+        "global_token_num": batch.meta_info["global_token_num"],
     }
     return metrics
 
 
 def compute_timing_metrics(batch: DataProto, timing_raw: Dict[str, float]) -> Dict[str, Any]:
-    response_info = _compute_response_info(batch)
-    num_prompt_tokens = torch.sum(response_info["prompt_length"]).item()
-    num_response_tokens = torch.sum(response_info["response_length"]).item()
-    num_overall_tokens = num_prompt_tokens + num_response_tokens
+    # response_info = _compute_response_info(batch)
+    # num_prompt_tokens = torch.sum(response_info["prompt_length"]).item()
+    # num_response_tokens = torch.sum(response_info["response_length"]).item()
+    # num_overall_tokens = num_prompt_tokens + num_response_tokens
 
-    num_tokens_of_section = {
-        "gen": num_response_tokens,
-        **{
-            name: num_overall_tokens for name in ["ref", "values", "adv", "update_critic", "update_actor"]
-        },
-    }
+    # num_tokens_of_section = {
+    #     "gen": num_response_tokens,
+    #     **{
+    #         name: num_overall_tokens for name in ["ref", "values", "adv", "update_critic", "update_actor"]
+    #     },
+    # }
 
     return {
         **{
             f"timing_s/{name}": value for name, value in timing_raw.items()
         },
-        **{
-            f"timing_per_token_ms/{name}": timing_raw[name] * 1000 / num_tokens_of_section[name] for name in set(num_tokens_of_section.keys(
-            )) & set(timing_raw.keys())
-        },
+        # **{
+        #     f"timing_per_token_ms/{name}": timing_raw[name] * 1000 / num_tokens_of_section[name] for name in set(num_tokens_of_section.keys(
+        #     )) & set(timing_raw.keys())
+        # },
     }
 
 

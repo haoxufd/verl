@@ -40,6 +40,7 @@ actor_rollout_ref:
     loss_agg_mode: "token-mean" # / "seq-mean-token-sum" / "seq-mean-token-mean"
     # NOTE: "token-mean" is the default behavior
     entropy_coeff: 0.001
+    imp_ratio_cap: 5
     use_kl_loss: False # True for GRPO
     use_torch_compile: True # False to disable torch compile
     kl_loss_coef: 0.001 # for grpo
@@ -77,6 +78,7 @@ actor_rollout_ref:
     ulysses_sequence_parallel_size: ${actor_rollout_ref.actor.ulysses_sequence_parallel_size} # sp size
   rollout:
     name: vllm
+    mode: sync # sync: LLM, async: AsyncLLM
     engine_seed: 0 # c.f. https://github.com/volcengine/verl/commit/1ee730163f6326e9679644db62eb32c8d1947c7f
     temperature: 1.0
     top_k: -1 # 0 for hf rollout, -1 for vllm rollout

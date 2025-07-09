@@ -35,7 +35,7 @@ from tensordict import TensorDict
 from torch import nn
 from typing import Any, Union
 from verl import DataProto
-from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
+from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length, pad_2d_list_to_constant_length
 from verl.workers.rollout.base import BaseRollout
 from vllm.distributed import parallel_state as vllm_ps
 from vllm import LLM, SamplingParams
@@ -56,7 +56,7 @@ def _pre_process_inputs(pad_token_id, prompt_token_ids: torch.Tensor) -> List[in
     return token_ids
 
 
-def _repeat_interleave(value: Union[torch.Tensor, np.ndarray], repeats: int) -> Union[torch.Tensor, List[Any]]:
+def _repeat_interleave(value: Union[torch.Tensor, np.ndarray], repeats: int) -> Union[torch.Tensor, np.ndarray]:
     if isinstance(value, torch.Tensor):
         return value.repeat_interleave(repeats, dim=0)
     else:
@@ -145,6 +145,13 @@ class vLLMRollout(BaseRollout):
         for k in config.keys():
             if hasattr(SamplingParams(), str(k)):
                 kwargs[k] = config.get(k)
+        
+        # if model_hf_config.vocab_size > tokenizer.vocab_size:
+        #     print(f"use fix_oov_logits_processor, {model_hf_config.vocab_size=} is out of {tokenizer.vocab_size=}")
+        #     def fix_oov(token_ids, logits):
+        #         logits[tokenizer.vocab_size:] = -float("inf")
+        #         return logits
+        #     kwargs['logits_processors'] = [fix_oov]
 
         print(f"kwargs: {kwargs}")
         self.sampling_params = SamplingParams(**kwargs)
@@ -287,6 +294,161 @@ class vLLMRollout(BaseRollout):
                 'position_ids': position_ids
             },
             batch_size=batch_size)
+
+        # free vllm cache engine
+        if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3') and self.config.free_cache_engine:
+            self.inference_engine.free_cache_engine()
+
+        return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
+
+    @torch.no_grad()
+    def generate_sequences_naive(self, prompts: DataProto, **kwargs):
+        # rebuild vllm cache engine
+        if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3') and self.config.free_cache_engine:
+            self.inference_engine.init_cache_engine()
+
+        idx = prompts.batch['input_ids']  # (bs, prompt_length)
+        # left-padded attention_mask
+        attention_mask = prompts.batch['attention_mask']
+        position_ids = prompts.batch['position_ids']
+
+        # used to construct attention_mask
+        eos_token_id = prompts.meta_info['eos_token_id']
+
+        batch_size = idx.size(0)
+
+        non_tensor_batch = prompts.non_tensor_batch
+        raw_question_ids = non_tensor_batch.pop('raw_question_ids')
+        real_prompt_ids = non_tensor_batch.pop('real_prompt_ids')
+
+        if 'multi_modal_data' in non_tensor_batch:
+            vllm_inputs = []
+            for raw_prompt_ids, multi_modal_data in zip(non_tensor_batch.pop('raw_prompt_ids'),
+                                                        non_tensor_batch.pop('multi_modal_data')):
+                vllm_inputs.append({'prompt_token_ids': raw_prompt_ids, 'multi_modal_data': multi_modal_data})
+        else:
+            vllm_inputs = [{'prompt_token_ids': prompt_token_ids} for prompt_token_ids in real_prompt_ids]
+
+        # ensure the type of `prompt_token_ids` passed to vllm is list[int]
+        # https://github.com/volcengine/verl/pull/772
+        for input_data in vllm_inputs:
+            if isinstance(input_data['prompt_token_ids'], np.ndarray):
+                input_data['prompt_token_ids'] = input_data['prompt_token_ids'].tolist()
+            elif not isinstance(input_data['prompt_token_ids'], list):
+                raise TypeError(
+                    f"prompt_token_ids must be a list or numpy array, got {type(input_data['prompt_token_ids'])}")
+
+        do_sample = prompts.meta_info.get('do_sample', True)
+        is_validate = prompts.meta_info.get('validate', False)
+        if not do_sample:
+            kwargs = {
+                'best_of': 1,
+                'top_p': 1.0,
+                'top_k': -1,
+                'min_p': 0.0,
+                'temperature': 0,
+                'n': 1  # if greedy, only 1 response
+            }
+        elif is_validate:
+            # TODO: try **
+            kwargs = {
+                'top_k': self.config.val_kwargs.top_k,
+                'top_p': self.config.val_kwargs.top_p,
+                'temperature': self.config.val_kwargs.temperature,
+                'n': 1,  # if validate, already repeat in ray_trainer
+            }
+        
+        sample_mode = prompts.meta_info.get('sample_mode', 'initial')
+        if do_sample and self.sampling_params.n > 1 and sample_mode == 'intermediate':
+            kwargs = {
+                'n': self.config.n // 2 - 1
+            }
+
+        # users can customize different sampling_params at different run
+        with self.update_sampling_params(**kwargs):
+            outputs = self.inference_engine.generate(
+                prompts=vllm_inputs,  # because we have already convert it to prompt token id
+                sampling_params=self.sampling_params,
+                use_tqdm=False)
+
+            # TODO(sgm): disable logprob when recompute_log_prob is enable
+            # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
+
+            responses = []
+            rollout_log_probs = []
+            for output in outputs:
+                for sample_id in range(len(output.outputs)):
+                    response_ids = output.outputs[sample_id].token_ids
+                    responses.append(response_ids)
+                    curr_log_prob = []
+                    for i, logprob in enumerate(output.outputs[sample_id].logprobs):
+                        curr_log_prob.append(logprob[response_ids[i]].logprob)
+                    rollout_log_probs.append(curr_log_prob)
+            
+            rollout_log_probs = pad_2d_list_to_constant_length(rollout_log_probs, -1, self.config.response_length).to(idx.device)
+            rollout_log_probs = rollout_log_probs.to(torch.float32)
+            
+            real_response_length = [len(resp) for resp in responses]
+            
+            # construct pseudo response by adding a prefix to real response
+            # this prefix is the real prompt with the prefix of raw question removed
+            for i in range(len(responses)):
+                prompt_index = i // self.sampling_params.n  
+                real_prompt = real_prompt_ids[prompt_index]
+                raw_question = raw_question_ids[prompt_index]
+                responses[i] = real_prompt[len(raw_question):] + list(responses[i])
+            
+            responses = pad_2d_list_to_constant_length(responses, self.pad_token_id, self.config.response_length).to(idx.device)
+            real_responses = []
+            for i in range(len(responses)):
+                prompt_index = i // self.sampling_params.n  
+                real_prompt = real_prompt_ids[prompt_index]
+                raw_question = raw_question_ids[prompt_index]
+                s = len(real_prompt) - len(raw_question)
+                e = s + real_response_length[i]
+                if e > len(responses[i]):
+                    e = len(responses[i])
+                real_responses.append(responses[i, s : e].tolist())
+            non_tensor_batch["real_responses"] = np.array(real_responses, dtype='O')
+
+            if self.sampling_params.n > 1 and do_sample:
+                idx = _repeat_interleave(idx, self.sampling_params.n)
+                attention_mask = _repeat_interleave(attention_mask, self.sampling_params.n)
+                position_ids = _repeat_interleave(position_ids, self.sampling_params.n)
+                batch_size = batch_size * self.sampling_params.n
+            
+            seq = torch.cat([idx, responses], dim=-1)
+
+        response_length = responses.size(1)
+        # delta_position_id = torch.arange(1, response_length + 1)
+        delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
+        delta_position_id = delta_position_id.unsqueeze(0).expand(batch_size, -1)
+        if position_ids.dim() == 3:  # qwen2vl mrope
+            delta_position_id = delta_position_id.view(batch_size, 1, -1).expand(batch_size, 3, -1)
+
+        # TODO(sgm): fix position_ids on right_pad
+        # prompt: left pad + response: right pad
+        # attention_mask: [0,0,0,0,1,1,1,1, | 1,1,1,0,0,0,0,0]
+        # position_ids:   [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
+        response_position_ids = position_ids[:, -1:] + delta_position_id
+        position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
+        response_attention_mask = get_response_mask(response_id=responses,
+                                                    eos_token=eos_token_id,
+                                                    dtype=attention_mask.dtype)
+        attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
+
+        # all the tp ranks should contain the same data here. data in all ranks are valid
+        batch = TensorDict(
+            {
+                'prompts': idx,
+                'responses': responses,
+                'input_ids': seq,  # here input_ids become the whole sentences
+                'rollout_log_probs': rollout_log_probs, # we will recompute old log prob with actor
+                'attention_mask': attention_mask,
+                'position_ids': position_ids
+            },
+            batch_size=batch_size)
+
 
         # free vllm cache engine
         if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3') and self.config.free_cache_engine:

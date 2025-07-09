@@ -16,8 +16,10 @@
 
 def _default_compute_score(data_source, solution_str, ground_truth, extra_info=None):
     if data_source == 'openai/gsm8k':
-        from . import gsm8k
-        res = gsm8k.compute_score(solution_str, ground_truth)
+        # from . import gsm8k
+        # res = gsm8k.compute_score(solution_str, ground_truth)
+        from . import math_dapo
+        res = math_dapo.compute_score(solution_str, ground_truth, strict_box_verify=True)
     elif data_source in ['lighteval/MATH', 'DigitalLearningGmbH/MATH-lighteval']:
         from . import math
         res = math.compute_score(solution_str, ground_truth)
@@ -30,7 +32,7 @@ def _default_compute_score(data_source, solution_str, ground_truth, extra_info=N
         res = math_verify.compute_score(solution_str, ground_truth)
     elif data_source == 'math_dapo':
         from . import math_dapo
-        res = math_dapo.compute_score(solution_str, ground_truth)
+        res = math_dapo.compute_score(solution_str, ground_truth, strict_box_verify=True)
     elif data_source in [
             'numina_aops_forum', 'numina_synthetic_math', 'numina_amc_aime', 'numina_synthetic_amc', 'numina_cn_k12',
             'numina_olympiads'
@@ -52,3 +54,14 @@ def _default_compute_score(data_source, solution_str, ground_truth, extra_info=N
         return float(res)
     else:
         return float(res[0])
+
+# def sgrpo_eval_compute_score(data_source, solution_str, ground_truth, extra_info=None):
+#     from . import math_verify
+#     res = math_verify.compute_score(solution_str, ground_truth)
+
+#     if isinstance(res, dict):
+#         return res
+#     elif isinstance(res, (int, float, bool)):
+#         return float(res)
+#     else:
+#         return float(res[0])

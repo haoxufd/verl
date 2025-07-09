@@ -302,7 +302,9 @@ def compute_policy_loss(old_log_prob,
                         cliprange_low=None,
                         cliprange_high=None,
                         clip_ratio_c=3.0,
-                        loss_agg_mode="token-mean"):
+                        loss_agg_mode="token-mean",
+                        rollout_log_probs=None,
+                        imp_ratio_cap=-1):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
     Args:
         old_log_prob: `(torch.Tensor)`
@@ -357,6 +359,13 @@ def compute_policy_loss(old_log_prob,
         torch.gt(clip_pg_losses1, pg_losses3) * (advantages < 0).float(), response_mask)
 
     pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+
+    if imp_ratio_cap > 0:
+        # Apply importance sampling ratio clipping
+        imp_ratio = torch.exp(old_log_prob - rollout_log_probs)
+        imp_ratio = torch.clamp(imp_ratio, max=imp_ratio_cap)
+        pg_losses = pg_losses * imp_ratio
+    
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
