@@ -508,11 +508,13 @@ class RayPPOTrainer:
 
         if train_dataset is None:
             train_dataset = create_rl_dataset(
-                self.config.data.train_files, self.config.data, self.tokenizer, self.processor
+                self.config.data.train_files, self.config.data, self.tokenizer, self.processor, 
+                enable_thinking=self.config.actor_rollout_ref.rollout.enable_thinking
             )
         if val_dataset is None:
             val_dataset = create_rl_dataset(
-                self.config.data.val_files, self.config.data, self.tokenizer, self.processor
+                self.config.data.val_files, self.config.data, self.tokenizer, self.processor, 
+                is_train=False, enable_thinking=self.config.actor_rollout_ref.rollout.enable_thinking,
             )
         self.train_dataset, self.val_dataset = train_dataset, val_dataset
 
@@ -576,7 +578,7 @@ class RayPPOTrainer:
     def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
         """Dump rollout/validation samples as JSONL."""
         os.makedirs(dump_path, exist_ok=True)
-        filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
+        filename = os.path.join(dump_path, f"{self.gen_steps}.jsonl")
 
         n = len(inputs)
         base_data = {
@@ -584,7 +586,7 @@ class RayPPOTrainer:
             "output": outputs,
             "gts": gts,
             "score": scores,
-            "step": [self.global_steps] * n,
+            "step": [self.gen_steps] * n,
         }
 
         for k, v in reward_extra_infos_dict.items():

@@ -279,7 +279,7 @@ class TaskRunner:
         trainer.fit()
 
 
-def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=True):
+def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=True, enable_thinking=False):
     """Create a dataset.
 
     Arguments:
@@ -324,6 +324,7 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=Tr
         tokenizer=tokenizer,
         processor=processor,
         config=data_config,
+        enable_thinking=enable_thinking,
     )
 
     return dataset
