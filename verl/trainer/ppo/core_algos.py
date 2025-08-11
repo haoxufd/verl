@@ -747,6 +747,8 @@ def compute_policy_loss(
     cliprange_high=None,
     clip_ratio_c=3.0,
     loss_agg_mode: str = "token-mean",
+    rollout_log_probs=None,
+    imp_ratio_cap=-1,
 ):
     """
     Compute the clipped policy objective and related metrics for PPO.
@@ -807,6 +809,13 @@ def compute_policy_loss(
     )
 
     pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+
+    if imp_ratio_cap > 0:
+        # Apply importance sampling ratio clipping
+        imp_ratio = torch.exp(old_log_prob - rollout_log_probs)
+        imp_ratio = torch.clamp(imp_ratio, max=imp_ratio_cap)
+        pg_losses = pg_losses * imp_ratio
+
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
@@ -819,6 +828,8 @@ def compute_policy_loss_vanilla(
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "token-mean",
+    rollout_log_probs=None,
+    imp_ratio_cap=-1,
     config: Optional[DictConfig | AlgoConfig] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
@@ -884,6 +895,13 @@ def compute_policy_loss_vanilla(
     )
 
     pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+
+    if imp_ratio_cap > 0:
+        # Apply importance sampling ratio clipping
+        imp_ratio = torch.exp(old_log_prob - rollout_log_probs)
+        imp_ratio = torch.clamp(imp_ratio, max=imp_ratio_cap)
+        pg_losses = pg_losses * imp_ratio
+
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
@@ -1270,6 +1288,13 @@ def compute_value_loss(
 
 
 def kl_penalty(logprob: torch.FloatTensor, ref_logprob: torch.FloatTensor, kl_penalty) -> torch.FloatTensor:
+
+    forward_score = kl_penalty_forward(logprob, ref_logprob, kl_penalty)
+    backward_score = 0.5 * (logprob - ref_logprob).square()
+
+    return backward_score - backward_score.detach() + forward_score.detach()
+
+def kl_penalty_forward(logprob: torch.FloatTensor, ref_logprob: torch.FloatTensor, kl_penalty) -> torch.FloatTensor:
     """Compute KL divergence given logprob and ref_logprob.
     Copied from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1104
     See more description in http://joschu.net/blog/kl-approx.html

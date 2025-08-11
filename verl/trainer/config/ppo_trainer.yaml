@@ -115,6 +115,14 @@ actor_rollout_ref:
     # Whether to enable thinking mode for the rollout model
     enable_thinking: False
 
+    calculate_log_probs: True
+
+  actor:
+
+    # whether to apply the truncated Importance Sampling (-1 for no importance sampling)
+    imp_ratio_cap: 5
+
+
   # profiler configs
   profiler:
 

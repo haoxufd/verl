@@ -2,7 +2,7 @@
 set -xeuo pipefail
 
 project_name='DAPO'
-exp_name='DAPO-Qwen3-4B'
+exp_name='DAPO-Qwen3-4B-ImpSamp'
 
 adv_estimator=grpo
 
@@ -127,8 +127,8 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes="${NNODES}" \
     trainer.val_before_train=True \
-    trainer.test_freq=1 \
-    trainer.save_freq=10 \
+    trainer.test_freq=5 \
+    trainer.save_freq=20 \
     trainer.total_epochs=5 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
