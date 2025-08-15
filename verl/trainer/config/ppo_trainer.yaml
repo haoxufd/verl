@@ -272,6 +272,8 @@ trainer:
   # Directory for logging validation data; no dump if null
   validation_data_dir: null
 
+  high_entropy_token_dir: null
+
   # Number of nodes used in the training
   nnodes: 1
 

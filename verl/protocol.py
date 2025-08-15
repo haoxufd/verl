@@ -876,6 +876,12 @@ class DataProto:
             non_tensor_batch=repeated_non_tensor_batch,
             meta_info=self.meta_info,
         )
+    
+    def repeat_with_delta_raw_prompt_ids(self, delta_raw_prompt_ids, repeat_times=2, interleave=True):
+        ret = self.repeat(repeat_times=repeat_times, interleave=interleave)
+        for i in range(len(ret.non_tensor_batch["raw_prompt_ids"])):
+            ret.non_tensor_batch["raw_prompt_ids"][i] = ret.non_tensor_batch["raw_prompt_ids"][i] + delta_raw_prompt_ids[i]
+        return ret
 
     def unfold_column_chunks(self, n_split: int, split_keys: Optional[list[str]] = None):
         """Split along the second dim into `n_split`, unfold it to the first dim (batch dim)

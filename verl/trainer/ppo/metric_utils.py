@@ -121,6 +121,8 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     valid_adv = torch.masked_select(advantages, response_mask)
     valid_returns = torch.masked_select(returns, response_mask)
 
+    wasted_trajectories = batch.meta_info.get("wasted_traj", 0)
+
     if use_critic:
         values = batch.batch["values"]
         valid_values = torch.masked_select(values, response_mask)
@@ -168,6 +170,8 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "prompt_length/max": torch.max(prompt_length).detach().item(),
         "prompt_length/min": torch.min(prompt_length).detach().item(),
         "prompt_length/clip_ratio": torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
+        # batch size
+        "batch_size": len(batch),
     }
 
     # multi-turn conversation

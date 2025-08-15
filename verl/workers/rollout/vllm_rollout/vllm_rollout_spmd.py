@@ -342,9 +342,17 @@ class vLLMRollout(BaseRollout):
             # TODO(sgm): disable logprob when recompute_log_prob is enable
             # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
 
+            question_length = attention_mask.sum(dim=-1).tolist()
+            partial_solution = []
+            for i, input_data in enumerate(vllm_inputs):
+                partial_solution.append(input_data["prompt_token_ids"][question_length[i] :])
+
+            if self.config.calculate_log_probs:
+                base_rollout_log_probs = prompts.batch["rollout_log_probs"]
+
             response = []
             rollout_log_probs = []
-            for output in outputs:
+            for j, output in enumerate(outputs):
                 for sample_id in range(len(output.outputs)):
                     response_ids = output.outputs[sample_id].token_ids
                     response.append(response_ids)
@@ -352,7 +360,16 @@ class vLLMRollout(BaseRollout):
                         curr_log_prob = []
                         for i, logprob in enumerate(output.outputs[sample_id].logprobs):
                             curr_log_prob.append(logprob[response_ids[i]].logprob)
+                        if self.config.compute_log_probs:
+                            curr_log_prob = base_rollout_log_probs[j][: len(partial_solution[j])] + curr_log_prob
+                            if len(curr_log_prob) > self.config.response_length:
+                                curr_log_prob = curr_log_prob[: self.config.response_length]
                         rollout_log_probs.append(curr_log_prob)
+            
+            for i in range(len(response)):
+                response[i] = partial_solution[i] + response[i]
+                if len(response[i]) > self.config.response_length:
+                    response[i] = response[i][: self.config.response_length]
 
             response = pad_2d_list_to_length(response, self.pad_token_id, max_length=self.config.response_length).to(
                 idx.device

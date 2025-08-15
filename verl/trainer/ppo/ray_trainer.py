@@ -271,6 +271,18 @@ def compute_advantage(
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.EPPO:
+        # Initialize the mask for EPPO calculation
+        grpo_calculation_mask = data.batch["process_response_mask"]
+        # Call compute_grpo_outcome_advantage with parameters matching its definition
+        advantages, returns = core_algos.compute_grpo_outcome_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=grpo_calculation_mask,
+            index=data.non_tensor_batch["uid"],
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
     else:
         # handle all other adv estimator type other than GAE and GRPO
         adv_estimator_fn = core_algos.get_adv_estimator_fn(adv_estimator)
@@ -578,7 +590,7 @@ class RayPPOTrainer:
     def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
         """Dump rollout/validation samples as JSONL."""
         os.makedirs(dump_path, exist_ok=True)
-        filename = os.path.join(dump_path, f"{self.gen_steps}.jsonl")
+        filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
 
         n = len(inputs)
         base_data = {
@@ -586,7 +598,7 @@ class RayPPOTrainer:
             "output": outputs,
             "gts": gts,
             "score": scores,
-            "step": [self.gen_steps] * n,
+            "step": [self.global_steps] * n,
         }
 
         for k, v in reward_extra_infos_dict.items():
