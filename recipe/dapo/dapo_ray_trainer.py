@@ -16,7 +16,6 @@ FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
-from code import interact
 import uuid
 from collections import defaultdict
 from copy import deepcopy
@@ -132,45 +131,16 @@ class RayDAPOTrainer(RayPPOTrainer):
                         batch_keys=["input_ids", "attention_mask", "position_ids"],
                         non_tensor_batch_keys=["raw_prompt_ids"],
                     )
-                # gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
 
                 is_last_step = self.gen_steps >= self.total_training_steps
 
                 with marked_timer("step", timing_raw):
                     # generate a batch
-                    with marked_timer("first_gen", timing_raw, "red"):
-                        first_gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-                        timing_raw.update(first_gen_batch_output.meta_info["timing"])
-                        first_gen_batch_output.meta_info.pop("timing", None)
-                    
-                    if self.config.actor_rollout_ref.rollout.calculate_log_probs:
-                        new_batch.batch["rollout_log_probs"] = first_gen_batch_output.batch["rollout_log_probs"]
-                    
-                    with marked_timer("entropy", timing_raw, "red"):
-                        log_prob = self.actor_rollout_wg.compute_log_prob(first_gen_batch_output)
-                        entropys = log_prob.batch["entropys"]
-                    
-                    rollout_n = self.config.actor_rollout_ref.rollout.n
-                    num_entropy_points = self.config.actor_rollout_ref.rollout.top_entropy
-                    num_samples_per_point = rollout_n // num_entropy_points
-                    partial_response = []
-                    indices = torch.topk(entropys, k=num_entropy_points, dim=-1).indices
-                    for i in range(indices.shape[0]):
-                        for j in range(num_entropy_points):
-                            num_samples = num_samples_per_point - 1 if j == 0 else num_samples_per_point
-                            partial_response.extend([first_gen_batch_output.batch["responses"][i][:indices[i][j].tolist()]] * num_samples)
-                    gen_batch = gen_batch.repeat_with_delta_raw_prompt_ids(partial_response, repeat_times=rollout_n - 1, interleave=True)
-                    breakpoint()
-
-                    with marked_timer("second_gen", timing_raw, "red"):
-                        second_gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-                        timing_raw.update(second_gen_batch_output.meta_info["timing"])
-                        second_gen_batch_output.meta_info.pop("timing", None)
-
-                    gen_batch_output = DataProto.concat([first_gen_batch_output[:1], second_gen_batch_output[:rollout_n - 1]])
-                    for i in range(1, len(first_gen_batch_output)):
-                        delta_gen_batch_output = DataProto.concat([first_gen_batch_output[i:i+1], second_gen_batch_output[i * (rollout_n - 1) : (i + 1) * (rollout_n - 1)]])
-                        gen_batch_output = DataProto.concat([gen_batch_output, delta_gen_batch_output])
+                    with marked_timer("gen", timing_raw, "red"):
+                        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                        timing_raw.update(gen_batch_output.meta_info["timing"])
+                        gen_batch_output.meta_info.pop("timing", None)
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with marked_timer("gen_max", timing_raw, "red"):
@@ -188,15 +158,12 @@ class RayDAPOTrainer(RayPPOTrainer):
 
                             del gen_baseline_batch, gen_baseline_output
 
-                    # first repeat to align with the number of entropy points
-                    new_batch = new_batch.repeat(repeat_times=num_entropy_points, interleave=True)
                     new_batch.non_tensor_batch["uid"] = np.array(
                         [str(uuid.uuid4()) for _ in range(len(new_batch.batch))], dtype=object
                     )
-                    # second repeat to align with the number of samples per point
-                    new_batch = new_batch.repeat(repeat_times=num_samples_per_point, interleave=True)
+                    # repeat to align with repeated responses in rollout
+                    new_batch = new_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     new_batch = new_batch.union(gen_batch_output)
-                    breakpoint()
 
                     with marked_timer("reward", timing_raw, "yellow"):
                         # compute scores. Support both model and function-based.
@@ -235,33 +202,6 @@ class RayDAPOTrainer(RayPPOTrainer):
                             )  # TODO: This will be cleared if we use multiple genenration batches
                         else:
                             new_batch.batch["token_level_rewards"] = new_batch.batch["token_level_scores"]
-                    
-                    # Log rollout generations if enabled
-                    rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
-                    if rollout_data_dir:
-                        with marked_timer("dump_rollout_generations", timing_raw, color="green"):
-                            inputs = self.tokenizer.batch_decode(new_batch.batch["prompts"], skip_special_tokens=True)
-                            outputs = self.tokenizer.batch_decode(new_batch.batch["responses"], skip_special_tokens=True)
-                            scores = new_batch.batch["token_level_scores"].sum(-1).cpu().tolist()
-                            sample_gts = [
-                                item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None)
-                                for item in new_batch
-                            ]
-
-                            if "request_id" in new_batch.non_tensor_batch:
-                                reward_extra_infos_dict.setdefault(
-                                    "request_id",
-                                    new_batch.non_tensor_batch["request_id"].tolist(),
-                                )
-
-                            self._dump_generations(
-                                inputs=inputs,
-                                outputs=outputs,
-                                gts=sample_gts,
-                                scores=scores,
-                                reward_extra_infos_dict=reward_extra_infos_dict,
-                                dump_path=rollout_data_dir,
-                            )
 
                     if not self.config.algorithm.filter_groups.enable:
                         batch = new_batch
@@ -323,6 +263,10 @@ class RayDAPOTrainer(RayPPOTrainer):
                             # Align the batch
                             traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
                             batch = batch[:traj_bsz]
+                    
+                    num_dropped = len(batch) % self.actor_rollout_wg.world_size
+                    batch = batch[:len(batch) - num_dropped] if num_dropped > 0 else batch
+                    print(f"Batch size after filtering: {len(batch)}")
 
                     # === Updating ===
 
@@ -381,6 +325,33 @@ class RayDAPOTrainer(RayPPOTrainer):
                             critic_output = self.critic_wg.update_critic(batch)
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                         metrics.update(critic_output_metrics)
+                    
+                    # Log rollout generations if enabled
+                    rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
+                    if rollout_data_dir:
+                        with marked_timer("dump_rollout_generations", timing_raw, color="green"):
+                            inputs = self.tokenizer.batch_decode(new_batch.batch["prompts"], skip_special_tokens=True)
+                            outputs = self.tokenizer.batch_decode(new_batch.batch["responses"], skip_special_tokens=True)
+                            scores = new_batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+                            sample_gts = [
+                                item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None)
+                                for item in new_batch
+                            ]
+
+                            if "request_id" in new_batch.non_tensor_batch:
+                                reward_extra_infos_dict.setdefault(
+                                    "request_id",
+                                    new_batch.non_tensor_batch["request_id"].tolist(),
+                                )
+
+                            self._dump_generations(
+                                inputs=inputs,
+                                outputs=outputs,
+                                gts=sample_gts,
+                                scores=scores,
+                                reward_extra_infos_dict=reward_extra_infos_dict,
+                                dump_path=rollout_data_dir,
+                            )
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
