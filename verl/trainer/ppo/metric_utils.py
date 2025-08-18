@@ -77,7 +77,7 @@ def _compute_response_info(batch: DataProto) -> dict[str, Any]:
     )
 
 
-def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str, Any]:
+def compute_data_metrics(batch: DataProto, original_batch: DataProto, use_critic: bool = True) -> dict[str, Any]:
     """
     Computes various metrics from a batch of data for PPO training.
 
@@ -104,6 +104,9 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     sequence_score = batch.batch["token_level_scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
 
+    original_sequence_score = original_batch.batch["token_level_scores"].sum(-1)
+    original_sequence_reward = original_batch.batch["token_level_rewards"].sum(-1)
+
     advantages = batch.batch["advantages"]
     returns = batch.batch["returns"]
 
@@ -121,8 +124,6 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     valid_adv = torch.masked_select(advantages, response_mask)
     valid_returns = torch.masked_select(returns, response_mask)
 
-    wasted_trajectories = batch.meta_info.get("wasted_traj", 0)
-
     if use_critic:
         values = batch.batch["values"]
         valid_values = torch.masked_select(values, response_mask)
@@ -138,6 +139,14 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "critic/rewards/mean": torch.mean(sequence_reward).detach().item(),
         "critic/rewards/max": torch.max(sequence_reward).detach().item(),
         "critic/rewards/min": torch.min(sequence_reward).detach().item(),
+        # original score
+        "critic/original_score/mean": torch.mean(original_sequence_score).detach().item(),
+        "critic/original_score/max": torch.max(original_sequence_score).detach().item(),
+        "critic/original_score/min": torch.min(original_sequence_score).detach().item(),
+        # original reward
+        "critic/original_rewards/mean": torch.mean(original_sequence_reward).detach().item(),
+        "critic/original_rewards/max": torch.max(original_sequence_reward).detach().item(),
+        "critic/original_rewards/min": torch.min(original_sequence_reward).detach().item(),
         # adv
         "critic/advantages/mean": torch.mean(valid_adv).detach().item(),
         "critic/advantages/max": torch.max(valid_adv).detach().item(),

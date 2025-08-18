@@ -72,6 +72,7 @@ class RayDAPOTrainer(RayPPOTrainer):
 
         # load checkpoint before doing anything
         self._load_checkpoint()
+        self.gen_steps = self.global_steps
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
@@ -241,28 +242,29 @@ class RayDAPOTrainer(RayPPOTrainer):
                             if traj_from_prompt_uid in kept_prompt_uids:
                                 kept_traj_idxs.append(idx)
 
+                        original_batch = new_batch
                         new_batch = new_batch[kept_traj_idxs]
                         batch = new_batch if batch is None else DataProto.concat([batch, new_batch])
 
-                        prompt_bsz = self.config.data.train_batch_size
-                        if num_prompt_in_batch < prompt_bsz:
-                            print(f"{num_prompt_in_batch=} < {prompt_bsz=}")
-                            max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
-                            if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
-                                print(f"{num_gen_batches=}. Keep generating...")
-                                progress_bar.update(1)
-                                self.gen_steps += 1
-                                continue
-                            else:
-                                raise ValueError(
-                                    f"{num_gen_batches=} >= {max_num_gen_batches=}."
-                                    + " Generated too many. Please check if your data are too difficult."
-                                    + " You could also try set max_num_gen_batches=0 to enable endless trials."
-                                )
-                        else:
-                            # Align the batch
-                            traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
-                            batch = batch[:traj_bsz]
+                        # prompt_bsz = self.config.data.train_batch_size
+                        # if num_prompt_in_batch < prompt_bsz:
+                        #     print(f"{num_prompt_in_batch=} < {prompt_bsz=}")
+                        #     max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
+                        #     if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
+                        #         print(f"{num_gen_batches=}. Keep generating...")
+                        #         progress_bar.update(1)
+                        #         self.gen_steps += 1
+                        #         continue
+                        #     else:
+                        #         raise ValueError(
+                        #             f"{num_gen_batches=} >= {max_num_gen_batches=}."
+                        #             + " Generated too many. Please check if your data are too difficult."
+                        #             + " You could also try set max_num_gen_batches=0 to enable endless trials."
+                        #         )
+                        # else:
+                        #     # Align the batch
+                        #     traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
+                        #     batch = batch[:traj_bsz]
                     
                     num_dropped = len(batch) % self.actor_rollout_wg.world_size
                     batch = batch[:len(batch) - num_dropped] if num_dropped > 0 else batch
@@ -394,7 +396,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                     curr_step_profile = next_step_profile
 
                 # collect metrics
-                metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                metrics.update(compute_data_metrics(batch=batch, original_batch=original_batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()

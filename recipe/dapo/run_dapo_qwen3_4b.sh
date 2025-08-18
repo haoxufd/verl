@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-project_name='DAPO'
-exp_name='DAPO-Qwen3-4B'
+project_name='EPPO'
+exp_name='Qwen3-4B-DAPO'
 
 adv_estimator=grpo
 
@@ -25,7 +25,7 @@ loss_agg_mode="token-mean"
 enable_filter_groups=True
 filter_groups_metric=acc
 max_num_gen_batches=10
-train_prompt_bsz=16
+train_prompt_bsz=512
 gen_prompt_bsz=$((train_prompt_bsz * 2))
 n_resp_per_prompt=32
 train_prompt_mini_bsz=32
@@ -34,7 +34,7 @@ train_prompt_mini_bsz=32
 RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
 WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
-NNODES=${NNODES:-1}
+NNODES=${NNODES:-8}
 # Paths
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}"}
 MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3-4B"}
@@ -124,13 +124,12 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     trainer.logger='["console","wandb"]' \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
-    trainer.n_gpus_per_node=2 \
+    trainer.n_gpus_per_node=4 \
     trainer.nnodes="${NNODES}" \
     trainer.val_before_train=True \
     trainer.test_freq=5 \
     trainer.save_freq=10 \
-    trainer.total_epochs=5 \
+    trainer.total_epochs=6 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
     trainer.validation_data_dir="${RAY_DATA_HOME}/validation/${project_name}/${exp_name}" \
-    trainer.rollout_data_dir="${RAY_DATA_HOME}/rollout/${project_name}/${exp_name}"

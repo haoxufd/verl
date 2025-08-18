@@ -75,6 +75,7 @@ class RayEPPOTrainer(RayPPOTrainer):
 
         # load checkpoint before doing anything
         self._load_checkpoint()
+        self.gen_steps = self.global_steps
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
@@ -288,6 +289,7 @@ class RayEPPOTrainer(RayPPOTrainer):
                             if traj_from_prompt_uid in kept_prompt_uids:
                                 kept_traj_idxs.append(idx)
 
+                        original_batch = new_batch
                         new_batch = new_batch[kept_traj_idxs]
                         batch = new_batch if batch is None else DataProto.concat([batch, new_batch])
 
@@ -448,7 +450,7 @@ class RayEPPOTrainer(RayPPOTrainer):
                     curr_step_profile = next_step_profile
 
                 # collect metrics
-                metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                metrics.update(compute_data_metrics(batch=batch, original_batch=original_batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()
@@ -475,7 +477,7 @@ class RayEPPOTrainer(RayPPOTrainer):
     def _dump_high_entropy_tokens(self, high_entropy_tokens, dump_path):
         """Dump high-entropy tokens as txt."""
         os.makedirs(dump_path, exist_ok=True)
-        filename = os.path.join(dump_path, f"{self.gen_steps}.txt")
+        filename = os.path.join(dump_path, f"{self.global_steps}.txt")
 
         lines = [', '.join(sub_list) for sub_list in high_entropy_tokens]
 
