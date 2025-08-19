@@ -775,6 +775,43 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # clear kv cache
         get_torch_device().empty_cache()
         return output
+    
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
+    @DistProfiler.annotate(color="red", role="rollout_generate")
+    def generate_sequences_eppo(self, prompts: DataProto):
+        # Support all hardwares
+        prompts = prompts.to(get_device_id())
+
+        assert self._is_rollout
+
+        meta_info = {
+            "eos_token_id": self.generation_config.eos_token_id
+            if self.generation_config is not None
+            else self.tokenizer.eos_token_id,
+            "pad_token_id": self.generation_config.pad_token_id
+            if self.generation_config is not None
+            else self.tokenizer.pad_token_id,
+        }
+        prompts.meta_info.update(meta_info)
+        timing_generate = {}
+        with self.rollout_sharding_manager:
+            log_gpu_memory_usage("After entering rollout sharding manager", logger=logger)
+
+            with simple_timer("generate_sequences", timing_generate):
+                output = self.rollout.generate_sequences_eppo(prompts=prompts)
+
+            log_gpu_memory_usage("After rollout generation", logger=logger)
+
+        timing_generate.update(self.rollout_sharding_manager.timing)
+        # We calculate the average timing across all ranks
+        # to make sure meta_info["timing"] is the same
+        timing_generate = reduce_timing(timing_generate)
+        output.meta_info["timing"] = timing_generate
+        output = output.to("cpu")
+
+        # clear kv cache
+        get_torch_device().empty_cache()
+        return output
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")

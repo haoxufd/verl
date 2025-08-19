@@ -58,6 +58,8 @@ infer_ppo_max_token_len=$((max_prompt_length + max_response_length))
 offload=True
 gen_tp=1
 
+top_entropy=4
+
 ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     --working-dir "${WORKING_DIR}" \
     -- python3 -m recipe.eppo.main_eppo \
@@ -114,7 +116,7 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.n=16 \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.top_entropy=4 \
+    actor_rollout_ref.rollout.top_entropy=${top_entropy} \
     actor_rollout_ref.ref.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=-1 \

@@ -141,7 +141,7 @@ class RayEPPOTrainer(RayPPOTrainer):
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("first_gen", timing_raw, "red"):
-                        first_gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                        first_gen_batch_output = self.actor_rollout_wg.generate_sequences_eppo(gen_batch)
                         timing_raw.update(first_gen_batch_output.meta_info["timing"])
                     
                     if self.config.actor_rollout_ref.rollout.calculate_log_probs:
@@ -176,7 +176,7 @@ class RayEPPOTrainer(RayPPOTrainer):
                     gen_batch = gen_batch.repeat_with_delta_raw_prompt_ids(partial_response, repeat_times=rollout_n - 1, interleave=True)
 
                     with marked_timer("second_gen", timing_raw, "red"):
-                        second_gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                        second_gen_batch_output = self.actor_rollout_wg.generate_sequences_eppo(gen_batch)
                         timing_raw.update(second_gen_batch_output.meta_info["timing"])
                         second_gen_batch_output.meta_info.pop("timing", None)
 
@@ -189,7 +189,7 @@ class RayEPPOTrainer(RayPPOTrainer):
                         with marked_timer("gen_max", timing_raw, "red"):
                             gen_baseline_batch = deepcopy(gen_batch)
                             gen_baseline_batch.meta_info["do_sample"] = False
-                            gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
+                            gen_baseline_output = self.actor_rollout_wg.generate_sequences_eppo(gen_baseline_batch)
 
                             new_batch = new_batch.union(gen_baseline_output)
                             reward_baseline_tensor = self.reward_fn(new_batch)
