@@ -17,6 +17,7 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 from code import interact
+import json
 import uuid
 from collections import defaultdict
 from copy import deepcopy
@@ -36,7 +37,6 @@ from verl.trainer.ppo.metric_utils import (
 )
 from verl.trainer.ppo.ray_trainer import (
     AdvantageEstimator,
-    RayPPOTrainer,
     apply_kl_penalty,
     compute_advantage,
     compute_response_mask,
@@ -44,10 +44,12 @@ from verl.trainer.ppo.ray_trainer import (
 from verl.utils.profiler import marked_timer
 from verl.utils.rollout_skip import RolloutSkip
 
+from recipe.dapo.dapo_ray_trainer import RayDAPOTrainer
+
 import os
 
 
-class RayEPPOTrainer(RayPPOTrainer):
+class RayEPPOTrainer(RayDAPOTrainer):
     """
     Note that this trainer runs on the driver process on a single CPU/GPU node.
     """
@@ -140,7 +142,7 @@ class RayEPPOTrainer(RayPPOTrainer):
 
                 with marked_timer("step", timing_raw):
                     # generate a batch
-                    with marked_timer("first_gen", timing_raw, "red"):
+                    with marked_timer("gen", timing_raw, "red"):
                         first_gen_batch_output = self.actor_rollout_wg.generate_sequences_eppo(gen_batch)
                         timing_raw.update(first_gen_batch_output.meta_info["timing"])
                     
@@ -153,36 +155,40 @@ class RayEPPOTrainer(RayPPOTrainer):
                     
                     rollout_n = self.config.actor_rollout_ref.rollout.n
                     num_entropy_points = self.config.actor_rollout_ref.rollout.top_entropy
-                    num_samples_per_point = rollout_n // num_entropy_points
-                    partial_response = []
-                    indices = torch.topk(entropys, k=num_entropy_points, dim=-1).indices
+                    rollout_N = rollout_n * num_entropy_points
 
                     # record high-entropy tokens
+                    indices = torch.topk(entropys, k=32, dim=-1).indices
                     tokens_at_indices = torch.gather(first_gen_batch_output.batch["responses"], dim=1, index=indices).tolist()
                     texts_at_indices = []
                     for i in range(indices.shape[0]):
                         texts_at_indices.append(
                             self.tokenizer.batch_decode(tokens_at_indices[i], skip_special_tokens=True)
                         )
-                    texts_at_indices = [[text_str.replace("\n", "\\n") for text_str in text_list] for text_list in texts_at_indices]
+                    response_len = compute_response_mask(first_gen_batch_output).sum(dim=-1).tolist()
+                    texts_at_indices = [[text_str.replace("\n", "<|new_line|>") for text_str in text_list] for text_list in texts_at_indices]
+                    position_percentile = [(indices[i] / (response_len[i] - 1)).tolist() for i in range(indices.shape[0])]
+                    position_percentile = [[f"{p:.4f}" for p in pos_list] for pos_list in position_percentile]
+                    high_entropy_token_and_pos = [list(zip(texts_at_indices[i], position_percentile[i])) for i in range(len(texts_at_indices))]
                     high_entropy_token_dir = self.config.trainer.get("high_entropy_token_dir", None)
                     if high_entropy_token_dir is not None:
-                        self._dump_high_entropy_tokens(texts_at_indices, high_entropy_token_dir)
+                        self._dump_high_entropy_tokens(high_entropy_token_and_pos, high_entropy_token_dir)
 
+                    response_prefix = []
                     for i in range(indices.shape[0]):
                         for j in range(num_entropy_points):
-                            num_samples = num_samples_per_point - 1 if j == 0 else num_samples_per_point
-                            partial_response.extend([first_gen_batch_output.batch["responses"][i][:indices[i][j]].tolist()] * num_samples)
-                    gen_batch = gen_batch.repeat_with_delta_raw_prompt_ids(partial_response, repeat_times=rollout_n - 1, interleave=True)
+                            num_samples = rollout_n - 1 if j == 0 else rollout_n
+                            response_prefix.extend([first_gen_batch_output.batch["responses"][i][:indices[i][j]].tolist()] * num_samples)
+                    gen_batch = gen_batch.repeat_with_delta_raw_prompt_ids(response_prefix, repeat_times=rollout_N - 1, interleave=True)
 
-                    with marked_timer("second_gen", timing_raw, "red"):
+                    with marked_timer("gen", timing_raw, "red"):
                         second_gen_batch_output = self.actor_rollout_wg.generate_sequences_eppo(gen_batch)
                         timing_raw.update(second_gen_batch_output.meta_info["timing"])
                         second_gen_batch_output.meta_info.pop("timing", None)
 
-                    gen_batch_output = DataProto.concat([first_gen_batch_output[:1], second_gen_batch_output[:rollout_n - 1]])
+                    gen_batch_output = DataProto.concat([first_gen_batch_output[:1], second_gen_batch_output[:rollout_N - 1]])
                     for i in range(1, len(first_gen_batch_output)):
-                        delta_gen_batch_output = DataProto.concat([first_gen_batch_output[i:i+1], second_gen_batch_output[i * (rollout_n - 1) : (i + 1) * (rollout_n - 1)]])
+                        delta_gen_batch_output = DataProto.concat([first_gen_batch_output[i:i+1], second_gen_batch_output[i * (rollout_N - 1) : (i + 1) * (rollout_N - 1)]])
                         gen_batch_output = DataProto.concat([gen_batch_output, delta_gen_batch_output])
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
@@ -207,10 +213,10 @@ class RayEPPOTrainer(RayPPOTrainer):
                         [str(uuid.uuid4()) for _ in range(len(new_batch.batch))], dtype=object
                     )
                     # record the real start positions of the responses in new_batch
-                    new_batch.non_tensor_batch["response_start_positions"] = np.array(indices.reshape(-1).tolist())
+                    new_batch.non_tensor_batch["response_start_positions"] = np.array(indices[:, :num_entropy_points].reshape(-1).tolist())
 
                     # second repeat to align with the number of samples per point
-                    new_batch = new_batch.repeat(repeat_times=num_samples_per_point, interleave=True)
+                    new_batch = new_batch.repeat(repeat_times=rollout_n, interleave=True)
                     new_batch = new_batch.union(gen_batch_output)
 
                     with marked_timer("reward", timing_raw, "yellow"):
@@ -289,35 +295,31 @@ class RayEPPOTrainer(RayPPOTrainer):
                             if traj_from_prompt_uid in kept_prompt_uids:
                                 kept_traj_idxs.append(idx)
 
-                        original_batch = new_batch
                         new_batch = new_batch[kept_traj_idxs]
                         batch = new_batch if batch is None else DataProto.concat([batch, new_batch])
 
-                        # prompt_bsz = self.config.data.train_batch_size
-                        # if num_prompt_in_batch < prompt_bsz * num_entropy_points:
-                        #     print(f"{num_prompt_in_batch=} < {prompt_bsz * num_entropy_points=}")
-                        #     max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
-                        #     if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
-                        #         print(f"{num_gen_batches=}. Keep generating...")
-                        #         progress_bar.update(1)
-                        #         self.gen_steps += 1
-                        #         continue
-                        #     else:
-                        #         raise ValueError(
-                        #             f"{num_gen_batches=} >= {max_num_gen_batches=}."
-                        #             + " Generated too many. Please check if your data are too difficult."
-                        #             + " You could also try set max_num_gen_batches=0 to enable endless trials."
-                        #         )
-                        # else:
-                        #     # Align the batch
-                        #     traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
-                        #     print("Wasted trajectories: ", len(batch) - traj_bsz)
-                        #     batch.meta_info["wasted_traj"] = len(batch) - traj_bsz # should be divisible by num_samples_per_point
-                        #     batch = batch[:traj_bsz]
-                    
-                    num_dropped = len(batch) % self.actor_rollout_wg.world_size
-                    batch = batch[:len(batch) - num_dropped] if num_dropped > 0 else batch
-                    print(f"Batch size after filtering: {len(batch)}")
+                        prompt_bsz = self.config.data.train_batch_size
+                        if num_prompt_in_batch < prompt_bsz * num_entropy_points:
+                            print(f"{num_prompt_in_batch=} < {prompt_bsz * num_entropy_points=}")
+                            max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
+                            if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
+                                print(f"{num_gen_batches=}. Keep generating...")
+                                progress_bar.update(1)
+                                self.gen_steps += 1
+                                continue
+                            else:
+                                raise ValueError(
+                                    f"{num_gen_batches=} >= {max_num_gen_batches=}."
+                                    + " Generated too many. Please check if your data are too difficult."
+                                    + " You could also try set max_num_gen_batches=0 to enable endless trials."
+                                )
+                        else:
+                            # Align the batch
+                            traj_bsz = self.config.data.train_batch_size * rollout_N
+                            original_traj_bsz = len(batch)
+                            batch = batch[:traj_bsz]
+                            aligned_batch_size = len(batch)
+                            print(f"Aligned batch size: {aligned_batch_size} from original {original_traj_bsz}")
 
                     # === Updating ===
 
@@ -327,6 +329,34 @@ class RayEPPOTrainer(RayPPOTrainer):
                     mask = cols < torch.from_numpy(batch.non_tensor_batch["response_start_positions"]).unsqueeze(1)
                     batch.batch["process_response_mask"] = batch.batch["response_mask"].clone()
                     batch.batch["process_response_mask"][mask] = 0
+
+                    # Log rollout generations if enabled
+                    # This should be before the balancing step, or the orders of batch and reward_extra_info_dict would dismatch.
+                    rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
+                    if rollout_data_dir:
+                        with marked_timer("dump_rollout_generations", timing_raw, color="green"):
+                            inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+                            outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+                            scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+                            sample_gts = [
+                                item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None)
+                                for item in batch
+                            ]
+
+                            if "request_id" in batch.non_tensor_batch:
+                                reward_extra_infos_dict.setdefault(
+                                    "request_id",
+                                    batch.non_tensor_batch["request_id"].tolist(),
+                                )
+
+                            self._dump_generations(
+                                inputs=inputs,
+                                outputs=outputs,
+                                gts=sample_gts,
+                                scores=scores,
+                                reward_extra_infos_dict=reward_extra_infos_dict,
+                                dump_path=rollout_data_dir,
+                            )
 
                     # Balance the number of valid tokens across DP ranks.
                     # NOTE: This usually changes the order of data in the `batch`,
@@ -389,33 +419,6 @@ class RayEPPOTrainer(RayPPOTrainer):
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
-                    
-                    # Log rollout generations if enabled
-                    rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
-                    if rollout_data_dir:
-                        with marked_timer("dump_rollout_generations", timing_raw, color="green"):
-                            inputs = self.tokenizer.batch_decode(new_batch.batch["prompts"], skip_special_tokens=True)
-                            outputs = self.tokenizer.batch_decode(new_batch.batch["responses"], skip_special_tokens=True)
-                            scores = new_batch.batch["token_level_scores"].sum(-1).cpu().tolist()
-                            sample_gts = [
-                                item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None)
-                                for item in new_batch
-                            ]
-
-                            if "request_id" in new_batch.non_tensor_batch:
-                                reward_extra_infos_dict.setdefault(
-                                    "request_id",
-                                    new_batch.non_tensor_batch["request_id"].tolist(),
-                                )
-
-                            self._dump_generations(
-                                inputs=inputs,
-                                outputs=outputs,
-                                gts=sample_gts,
-                                scores=scores,
-                                reward_extra_infos_dict=reward_extra_infos_dict,
-                                dump_path=rollout_data_dir,
-                            )
 
                     # validate
                     if (
@@ -450,7 +453,7 @@ class RayEPPOTrainer(RayPPOTrainer):
                     curr_step_profile = next_step_profile
 
                 # collect metrics
-                metrics.update(compute_data_metrics(batch=batch, original_batch=original_batch, use_critic=self.use_critic))
+                metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()
@@ -474,14 +477,12 @@ class RayEPPOTrainer(RayPPOTrainer):
                 self.global_steps += 1
                 self.gen_steps += 1
 
-    def _dump_high_entropy_tokens(self, high_entropy_tokens, dump_path):
+    def _dump_high_entropy_tokens(self, high_entropy_token_and_pos, dump_path):
         """Dump high-entropy tokens as txt."""
         os.makedirs(dump_path, exist_ok=True)
-        filename = os.path.join(dump_path, f"{self.global_steps}.txt")
+        filename = os.path.join(dump_path, f"{self.gen_steps}.txt")
 
-        lines = [', '.join(sub_list) for sub_list in high_entropy_tokens]
-
-        with open(filename, "w") as f:
-            f.write("\n".join(lines) + "\n")
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(high_entropy_token_and_pos, f, ensure_ascii=False, indent=2)
 
         print(f"Dumped high-entropy tokens to {filename}")

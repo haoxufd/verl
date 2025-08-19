@@ -43,6 +43,10 @@ from verl.trainer.ppo.ray_trainer import (
 from verl.utils.profiler import marked_timer
 from verl.utils.rollout_skip import RolloutSkip
 
+import os
+
+from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
+
 
 class RayDAPOTrainer(RayPPOTrainer):
     """
@@ -72,7 +76,6 @@ class RayDAPOTrainer(RayPPOTrainer):
 
         # load checkpoint before doing anything
         self._load_checkpoint()
-        self.gen_steps = self.global_steps
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
@@ -242,33 +245,31 @@ class RayDAPOTrainer(RayPPOTrainer):
                             if traj_from_prompt_uid in kept_prompt_uids:
                                 kept_traj_idxs.append(idx)
 
-                        original_batch = new_batch
                         new_batch = new_batch[kept_traj_idxs]
                         batch = new_batch if batch is None else DataProto.concat([batch, new_batch])
 
-                        # prompt_bsz = self.config.data.train_batch_size
-                        # if num_prompt_in_batch < prompt_bsz:
-                        #     print(f"{num_prompt_in_batch=} < {prompt_bsz=}")
-                        #     max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
-                        #     if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
-                        #         print(f"{num_gen_batches=}. Keep generating...")
-                        #         progress_bar.update(1)
-                        #         self.gen_steps += 1
-                        #         continue
-                        #     else:
-                        #         raise ValueError(
-                        #             f"{num_gen_batches=} >= {max_num_gen_batches=}."
-                        #             + " Generated too many. Please check if your data are too difficult."
-                        #             + " You could also try set max_num_gen_batches=0 to enable endless trials."
-                        #         )
-                        # else:
-                        #     # Align the batch
-                        #     traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
-                        #     batch = batch[:traj_bsz]
-                    
-                    num_dropped = len(batch) % self.actor_rollout_wg.world_size
-                    batch = batch[:len(batch) - num_dropped] if num_dropped > 0 else batch
-                    print(f"Batch size after filtering: {len(batch)}")
+                        prompt_bsz = self.config.data.train_batch_size
+                        if num_prompt_in_batch < prompt_bsz:
+                            print(f"{num_prompt_in_batch=} < {prompt_bsz=}")
+                            max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
+                            if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
+                                print(f"{num_gen_batches=}. Keep generating...")
+                                progress_bar.update(1)
+                                self.gen_steps += 1
+                                continue
+                            else:
+                                raise ValueError(
+                                    f"{num_gen_batches=} >= {max_num_gen_batches=}."
+                                    + " Generated too many. Please check if your data are too difficult."
+                                    + " You could also try set max_num_gen_batches=0 to enable endless trials."
+                                )
+                        else:
+                            # Align the batch
+                            traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
+                            original_traj_bsz = len(batch)
+                            batch = batch[:traj_bsz]
+                            aligned_batch_size = len(batch)
+                            print(f"Aligned batch size: {aligned_batch_size} from original {original_traj_bsz}")
 
                     # === Updating ===
 
@@ -327,33 +328,6 @@ class RayDAPOTrainer(RayPPOTrainer):
                             critic_output = self.critic_wg.update_critic(batch)
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                         metrics.update(critic_output_metrics)
-                    
-                    # Log rollout generations if enabled
-                    rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
-                    if rollout_data_dir:
-                        with marked_timer("dump_rollout_generations", timing_raw, color="green"):
-                            inputs = self.tokenizer.batch_decode(new_batch.batch["prompts"], skip_special_tokens=True)
-                            outputs = self.tokenizer.batch_decode(new_batch.batch["responses"], skip_special_tokens=True)
-                            scores = new_batch.batch["token_level_scores"].sum(-1).cpu().tolist()
-                            sample_gts = [
-                                item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None)
-                                for item in new_batch
-                            ]
-
-                            if "request_id" in new_batch.non_tensor_batch:
-                                reward_extra_infos_dict.setdefault(
-                                    "request_id",
-                                    new_batch.non_tensor_batch["request_id"].tolist(),
-                                )
-
-                            self._dump_generations(
-                                inputs=inputs,
-                                outputs=outputs,
-                                gts=sample_gts,
-                                scores=scores,
-                                reward_extra_infos_dict=reward_extra_infos_dict,
-                                dump_path=rollout_data_dir,
-                            )
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
@@ -396,7 +370,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                     curr_step_profile = next_step_profile
 
                 # collect metrics
-                metrics.update(compute_data_metrics(batch=batch, original_batch=original_batch, use_critic=self.use_critic))
+                metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()
@@ -419,3 +393,130 @@ class RayDAPOTrainer(RayPPOTrainer):
                 progress_bar.update(1)
                 self.global_steps += 1
                 self.gen_steps += 1
+
+    def _save_checkpoint(self):
+        from verl.utils.fs import local_mkdir_safe
+
+        # path: given_path + `/global_step_{global_steps}` + `/actor`
+        local_global_step_folder = os.path.join(
+            self.config.trainer.default_local_dir, f"global_step_{self.global_steps}"
+        )
+
+        print(f"local_global_step_folder: {local_global_step_folder}")
+        actor_local_path = os.path.join(local_global_step_folder, "actor")
+
+        actor_remote_path = (
+            None
+            if self.config.trainer.default_hdfs_dir is None
+            else os.path.join(self.config.trainer.default_hdfs_dir, f"global_step_{self.global_steps}", "actor")
+        )
+
+        remove_previous_ckpt_in_save = self.config.trainer.get("remove_previous_ckpt_in_save", False)
+        if remove_previous_ckpt_in_save:
+            print(
+                "Warning: remove_previous_ckpt_in_save is deprecated,"
+                + " set max_actor_ckpt_to_keep=1 and max_critic_ckpt_to_keep=1 instead"
+            )
+        max_actor_ckpt_to_keep = (
+            self.config.trainer.get("max_actor_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
+        )
+        max_critic_ckpt_to_keep = (
+            self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
+        )
+
+        self.actor_rollout_wg.save_checkpoint(
+            actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
+        )
+
+        if self.use_critic:
+            critic_local_path = os.path.join(local_global_step_folder, "critic")
+            critic_remote_path = (
+                None
+                if self.config.trainer.default_hdfs_dir is None
+                else os.path.join(self.config.trainer.default_hdfs_dir, f"global_step_{self.global_steps}", "critic")
+            )
+            self.critic_wg.save_checkpoint(
+                critic_local_path, critic_remote_path, self.global_steps, max_ckpt_to_keep=max_critic_ckpt_to_keep
+            )
+
+        # save dataloader
+        local_mkdir_safe(local_global_step_folder)
+        dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
+        dataloader_state_dict = self.train_dataloader.state_dict()
+        torch.save(dataloader_state_dict, dataloader_local_path)
+
+        # latest checkpointed iteration tracker (for atomic usage)
+        local_latest_checkpointed_iteration = os.path.join(
+            self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
+        )
+        with open(local_latest_checkpointed_iteration, "w") as f:
+            f.write(str(self.global_steps))
+        
+        # latest gen step tracker (for atomic usage)
+        local_latest_gen_iteration = os.path.join(
+            self.config.trainer.default_local_dir, "latest_gen_iteration.txt"
+        )
+        with open(local_latest_gen_iteration, "w") as f:
+            f.write(str(self.gen_steps))
+    
+    def _load_checkpoint(self):
+        if self.config.trainer.resume_mode == "disable":
+            return 0
+
+        # load from hdfs
+        if self.config.trainer.default_hdfs_dir is not None:
+            raise NotImplementedError("load from hdfs is not implemented yet")
+        else:
+            checkpoint_folder = self.config.trainer.default_local_dir  # TODO: check path
+            if not os.path.isabs(checkpoint_folder):
+                working_dir = os.getcwd()
+                checkpoint_folder = os.path.join(working_dir, checkpoint_folder)
+            global_step_folder = find_latest_ckpt_path(checkpoint_folder)  # None if no latest
+
+        # find global_step_folder
+        if self.config.trainer.resume_mode == "auto":
+            if global_step_folder is None:
+                print("Training from scratch")
+                return 0
+        else:
+            if self.config.trainer.resume_mode == "resume_path":
+                assert isinstance(self.config.trainer.resume_from_path, str), "resume ckpt must be str type"
+                assert "global_step_" in self.config.trainer.resume_from_path, (
+                    "resume ckpt must specify the global_steps"
+                )
+                global_step_folder = self.config.trainer.resume_from_path
+                if not os.path.isabs(global_step_folder):
+                    working_dir = os.getcwd()
+                    global_step_folder = os.path.join(working_dir, global_step_folder)
+        print(f"Load from checkpoint folder: {global_step_folder}")
+        # set global step
+        self.global_steps = int(global_step_folder.split("global_step_")[-1])
+
+        print(f"Setting global step to {self.global_steps}")
+        print(f"Resuming from {global_step_folder}")
+
+        actor_path = os.path.join(global_step_folder, "actor")
+        critic_path = os.path.join(global_step_folder, "critic")
+        # load actor
+        self.actor_rollout_wg.load_checkpoint(
+            actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
+        )
+        # load critic
+        if self.use_critic:
+            self.critic_wg.load_checkpoint(
+                critic_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
+            )
+
+        # load dataloader,
+        # TODO: from remote not implemented yet
+        dataloader_local_path = os.path.join(global_step_folder, "data.pt")
+        if os.path.exists(dataloader_local_path):
+            dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
+            self.train_dataloader.load_state_dict(dataloader_state_dict)
+        else:
+            print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
+
+        # load latest gen iteration
+        latest_gen_iteration_local_path = os.path.join(checkpoint_folder, "latest_gen_iteration.txt")
+        with open(latest_gen_iteration_local_path, "r") as f:
+            self.gen_steps = int(f.read().strip())
