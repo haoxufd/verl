@@ -94,7 +94,7 @@ class RayEPPOTrainer(RayDAPOTrainer):
             rollout_skip.wrap_generate_sequences()
 
         # add tqdm
-        progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
+        progress_bar = tqdm(total=self.total_training_steps, initial=self.gen_steps, desc="Training Progress")
 
         # we start from step 1
         self.global_steps += 1
