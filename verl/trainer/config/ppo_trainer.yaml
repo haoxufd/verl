@@ -274,8 +274,6 @@ trainer:
   # Directory for logging validation data; no dump if null
   validation_data_dir: null
 
-  high_entropy_token_dir: null
-
   # Number of nodes used in the training
   nnodes: 1
 
@@ -337,6 +335,8 @@ trainer:
   # whether to use legacy worker implementation
   #  mode: "auto", "enable", or "disable"
   use_legacy_worker_impl: auto
+
+  align_batch: True
 
 # configs related to ray initialization
 ray_init:

@@ -2,7 +2,7 @@
 set -xeuo pipefail
 
 project_name='Qwen3-4B-WITH-DS-N-16'
-exp_name='EPPO-128x4x16'
+exp_name='EPPO-512x2x8-EG'
 
 adv_estimator=eppo
 
@@ -25,17 +25,17 @@ loss_agg_mode="token-mean"
 enable_filter_groups=True
 filter_groups_metric=acc
 max_num_gen_batches=10
-train_prompt_bsz=128
+train_prompt_bsz=512
 gen_prompt_bsz=$((train_prompt_bsz * 3))
-n_resp_per_prompt=16
-top_entropy=4
+n_resp_per_prompt=8
+top_entropy=2
 train_prompt_mini_bsz=32
 
 # Ray
 RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
 WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
-NNODES=${NNODES:-4}
+NNODES=${NNODES:-16}
 # Paths
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}"}
 MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3-4B"}
@@ -131,7 +131,7 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     trainer.val_before_train=True \
     trainer.test_freq=5 \
     trainer.save_freq=5 \
-    trainer.total_epochs=3 \
+    trainer.total_epochs=12 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
     trainer.validation_data_dir="${RAY_DATA_HOME}/validation/${project_name}/${exp_name}" \

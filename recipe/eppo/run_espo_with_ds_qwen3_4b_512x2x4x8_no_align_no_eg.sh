@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-project_name='Qwen3-4B-WITH-DS-N-16'
-exp_name='EPPO-512x2x8'
+project_name='Qwen3-4B-NO-ALIGN-512x2-N-32'
+exp_name='ESPO-4x8-NO-EG'
 
 adv_estimator=eppo
 
@@ -26,9 +26,9 @@ enable_filter_groups=True
 filter_groups_metric=acc
 max_num_gen_batches=10
 train_prompt_bsz=512
-gen_prompt_bsz=$((train_prompt_bsz * 3))
+gen_prompt_bsz=$((train_prompt_bsz * 2))
 n_resp_per_prompt=8
-top_entropy=2
+top_entropy=4
 train_prompt_mini_bsz=32
 
 # Ray
@@ -109,13 +109,13 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     actor_rollout_ref.rollout.top_p=${top_p} \
     actor_rollout_ref.rollout.top_k="${top_k}" \
     actor_rollout_ref.rollout.enable_thinking="${enable_thinking}" \
+    actor_rollout_ref.rollout.group_entropy=False \
     actor_rollout_ref.rollout.val_kwargs.temperature=${temperature} \
     actor_rollout_ref.rollout.val_kwargs.top_p=${val_top_p} \
     actor_rollout_ref.rollout.val_kwargs.top_k=${top_k} \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.n=16 \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.top_entropy=${top_entropy} \
     actor_rollout_ref.ref.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=-1 \
@@ -124,6 +124,7 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     reward_model.overlong_buffer.len=${overlong_buffer_len} \
     reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor} \
     trainer.logger='["console","wandb"]' \
+    trainer.wandb_run_id=atumjejg \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node=4 \
@@ -131,10 +132,9 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     trainer.val_before_train=True \
     trainer.test_freq=5 \
     trainer.save_freq=5 \
-    trainer.total_epochs=12 \
+    trainer.total_epochs=10 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
     trainer.validation_data_dir="${RAY_DATA_HOME}/validation/${project_name}/${exp_name}" \
-    trainer.rollout_data_dir="${RAY_DATA_HOME}/rollout/${project_name}/${exp_name}" \
+    trainer.align_batch=False \
     trainer.high_entropy_token_dir="${RAY_DATA_HOME}/high_entropy_tokens/${project_name}/${exp_name}" \
-    trainer.rollout_data_dir="${RAY_DATA_HOME}/rollout/${project_name}/${exp_name}" \

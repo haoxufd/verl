@@ -27,7 +27,15 @@ algorithm:
 trainer:
   project_name: verl-dapo
 
+  high_entropy_token_dir: null
+
 actor_rollout_ref:
   rollout:
     # How many top entropy tokens to consider as the sampling points.
     top_entropy: 4
+    
+    group_entropy: True
+
+    entropy_window_size: 100
+
+    window_shift_size: 50

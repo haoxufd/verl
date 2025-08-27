@@ -2,7 +2,7 @@
 set -xeuo pipefail
 
 project_name='Qwen3-4B-WITH-DS-N-16'
-exp_name='EPPO-256x2x16'
+exp_name='EPPO-256x2x16-EG'
 
 adv_estimator=eppo
 
@@ -109,7 +109,6 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     actor_rollout_ref.rollout.top_p=${top_p} \
     actor_rollout_ref.rollout.top_k="${top_k}" \
     actor_rollout_ref.rollout.enable_thinking="${enable_thinking}" \
-    actor_rollout_ref.rollout.group_entropy=False \
     actor_rollout_ref.rollout.val_kwargs.temperature=${temperature} \
     actor_rollout_ref.rollout.val_kwargs.top_p=${val_top_p} \
     actor_rollout_ref.rollout.val_kwargs.top_k=${top_k} \
@@ -125,6 +124,7 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     reward_model.overlong_buffer.len=${overlong_buffer_len} \
     reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor} \
     trainer.logger='["console","wandb"]' \
+    trainer.wandb_run_id=z2sjmsp9 \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node=4 \

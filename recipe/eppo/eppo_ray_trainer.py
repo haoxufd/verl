@@ -16,8 +16,8 @@ FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
-from code import interact
 import json
+from pydoc import text
 import uuid
 from collections import defaultdict
 from copy import deepcopy
@@ -77,7 +77,6 @@ class RayEPPOTrainer(RayDAPOTrainer):
 
         # load checkpoint before doing anything
         self._load_checkpoint()
-        self.gen_steps = self.global_steps
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
@@ -157,22 +156,74 @@ class RayEPPOTrainer(RayDAPOTrainer):
                     num_entropy_points = self.config.actor_rollout_ref.rollout.top_entropy
                     rollout_N = rollout_n * num_entropy_points
 
-                    # record high-entropy tokens
-                    indices = torch.topk(entropys, k=32, dim=-1).indices
-                    tokens_at_indices = torch.gather(first_gen_batch_output.batch["responses"], dim=1, index=indices).tolist()
-                    texts_at_indices = []
-                    for i in range(indices.shape[0]):
-                        texts_at_indices.append(
-                            self.tokenizer.batch_decode(tokens_at_indices[i], skip_special_tokens=True)
-                        )
+                    # find top entropy points as sampling positions
                     response_len = compute_response_mask(first_gen_batch_output).sum(dim=-1).tolist()
-                    texts_at_indices = [[text_str.replace("\n", "<|new_line|>") for text_str in text_list] for text_list in texts_at_indices]
-                    position_percentile = [(indices[i] / (response_len[i] - 1)).tolist() for i in range(indices.shape[0])]
-                    position_percentile = [[f"{p:.4f}" for p in pos_list] for pos_list in position_percentile]
-                    high_entropy_token_and_pos = [list(zip(texts_at_indices[i], position_percentile[i])) for i in range(len(texts_at_indices))]
+                    if not self.config.actor_rollout_ref.rollout.get("group_entropy", True):
+                        indices = torch.topk(entropys, k=num_entropy_points, dim=-1).indices
+                    else:
+                        window = self.config.actor_rollout_ref.rollout.get("entropy_window_size", 100)
+                        shift_size = self.config.actor_rollout_ref.rollout.get("window_shift_size", 50)
+                        indices = []
+
+                        for i in range(entropys.shape[0]):
+                            candidate_sampling_points = [0]
+                            last_possible_sampling_point = response_len[i] - window
+                            for j in range(shift_size, last_possible_sampling_point + 1, shift_size):
+                                if j + window <= response_len[i]:
+                                    candidate_sampling_points.append(j)
+                                else:
+                                    break
+
+                            if len(candidate_sampling_points) < num_entropy_points:
+                                index = candidate_sampling_points + [candidate_sampling_points[-1]] * (num_entropy_points - len(candidate_sampling_points))
+                                indices.append(index)
+                                continue
+                            
+                            last_point = None
+                            for point in candidate_sampling_points:
+                                entropys[i, point] = torch.mean(entropys[i, point : min(point + window, response_len[i])])
+                                if last_point is not None:
+                                    entropys[i, last_point + 1 : point] = 0
+                                last_point = point
+                            assert last_point is not None
+                            entropys[i, min(last_point + 1, response_len[i]) :] = 0
+
+                            index = torch.topk(entropys[i], k=num_entropy_points, dim=-1).indices.tolist()
+                            indices.append(index)
+                        
+                        indices = torch.tensor(indices, device=entropys.device) # TODO: device?
+
+                    # record high-entropy tokens
+                    all_info = []
+                    for i in range(indices.shape[0]):
+                        info = {
+                            "position": indices[i].tolist(),
+                            "relative_pos": (indices[i] / (response_len[i] - 1)).tolist(),
+                        }
+
+                        entropy_list = []
+                        text_list = []
+                        for j in range(num_entropy_points):
+                            point = indices[i][j].item()
+                            entropy = entropys[i][point].item()
+                            entropy_list.append(entropy)
+                            token = first_gen_batch_output.batch["responses"][i][point].item()
+                            tokens_ahead = first_gen_batch_output.batch["responses"][i][point + 1 : min(point + 50, response_len[i])].tolist()
+                            tokens_back = first_gen_batch_output.batch["responses"][i][max(0, point - 50) : point].tolist()
+                            text_ahead = self.tokenizer.decode(tokens_ahead, skip_special_tokens=True)
+                            text_back = self.tokenizer.decode(tokens_back, skip_special_tokens=True)
+                            text = self.tokenizer.decode([token], skip_special_tokens=True)
+                            concat_text = text_back + "<<<<<<" + text + ">>>>>>" + text_ahead
+                            text_list.append(concat_text)
+                        
+                        info["entropy"] = entropy_list
+                        info["text"] = text_list
+
+                        all_info.append(info)
+                    
                     high_entropy_token_dir = self.config.trainer.get("high_entropy_token_dir", None)
                     if high_entropy_token_dir is not None:
-                        self._dump_high_entropy_tokens(high_entropy_token_and_pos, high_entropy_token_dir)
+                        self._dump_high_entropy_tokens(all_info, high_entropy_token_dir)
 
                     response_prefix = []
                     for i in range(indices.shape[0]):
@@ -298,28 +349,33 @@ class RayEPPOTrainer(RayDAPOTrainer):
                         new_batch = new_batch[kept_traj_idxs]
                         batch = new_batch if batch is None else DataProto.concat([batch, new_batch])
 
-                        prompt_bsz = self.config.data.train_batch_size
-                        if num_prompt_in_batch < prompt_bsz * num_entropy_points:
-                            print(f"{num_prompt_in_batch=} < {prompt_bsz * num_entropy_points=}")
-                            max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
-                            if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
-                                print(f"{num_gen_batches=}. Keep generating...")
-                                progress_bar.update(1)
-                                self.gen_steps += 1
-                                continue
+                        if self.config.trainer.align_batch:
+                            prompt_bsz = self.config.data.train_batch_size
+                            if num_prompt_in_batch < prompt_bsz * num_entropy_points:
+                                print(f"{num_prompt_in_batch=} < {prompt_bsz * num_entropy_points=}")
+                                max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
+                                if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
+                                    print(f"{num_gen_batches=}. Keep generating...")
+                                    progress_bar.update(1)
+                                    self.gen_steps += 1
+                                    continue
+                                else:
+                                    raise ValueError(
+                                        f"{num_gen_batches=} >= {max_num_gen_batches=}."
+                                        + " Generated too many. Please check if your data are too difficult."
+                                        + " You could also try set max_num_gen_batches=0 to enable endless trials."
+                                    )
                             else:
-                                raise ValueError(
-                                    f"{num_gen_batches=} >= {max_num_gen_batches=}."
-                                    + " Generated too many. Please check if your data are too difficult."
-                                    + " You could also try set max_num_gen_batches=0 to enable endless trials."
-                                )
+                                # Align the batch
+                                traj_bsz = self.config.data.train_batch_size * rollout_N
+                                original_traj_bsz = len(batch)
+                                batch = batch[:traj_bsz]
+                                aligned_batch_size = len(batch)
+                                print(f"Aligned batch size: {aligned_batch_size} from original {original_traj_bsz}")
                         else:
-                            # Align the batch
-                            traj_bsz = self.config.data.train_batch_size * rollout_N
-                            original_traj_bsz = len(batch)
-                            batch = batch[:traj_bsz]
-                            aligned_batch_size = len(batch)
-                            print(f"Aligned batch size: {aligned_batch_size} from original {original_traj_bsz}")
+                            rest = len(batch) % self.actor_rollout_wg.world_size
+                            if rest != 0:
+                                batch = batch[: len(batch) - rest]
 
                     # === Updating ===
 
@@ -461,6 +517,7 @@ class RayEPPOTrainer(RayDAPOTrainer):
                 timing_raw = defaultdict(float)  # clear timing
 
                 metrics["train/num_gen_batches"] = num_gen_batches
+                metrics["train/batch_size"] = len(batch)
                 batch = None
                 num_prompt_in_batch = 0
                 num_gen_batches = 0
@@ -477,12 +534,12 @@ class RayEPPOTrainer(RayDAPOTrainer):
                 self.global_steps += 1
                 self.gen_steps += 1
 
-    def _dump_high_entropy_tokens(self, high_entropy_token_and_pos, dump_path):
-        """Dump high-entropy tokens as txt."""
+    def _dump_high_entropy_tokens(self, high_entropy_token_info, dump_path):
+        """Dump high-entropy tokens as json."""
         os.makedirs(dump_path, exist_ok=True)
-        filename = os.path.join(dump_path, f"{self.gen_steps}.txt")
+        filename = os.path.join(dump_path, f"{self.gen_steps}.json")
 
         with open(filename, "w", encoding="utf-8") as f:
-            json.dump(high_entropy_token_and_pos, f, ensure_ascii=False, indent=2)
+            json.dump(high_entropy_token_info, f, ensure_ascii=False, indent=2)
 
         print(f"Dumped high-entropy tokens to {filename}")

@@ -248,28 +248,33 @@ class RayDAPOTrainer(RayPPOTrainer):
                         new_batch = new_batch[kept_traj_idxs]
                         batch = new_batch if batch is None else DataProto.concat([batch, new_batch])
 
-                        prompt_bsz = self.config.data.train_batch_size
-                        if num_prompt_in_batch < prompt_bsz:
-                            print(f"{num_prompt_in_batch=} < {prompt_bsz=}")
-                            max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
-                            if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
-                                print(f"{num_gen_batches=}. Keep generating...")
-                                progress_bar.update(1)
-                                self.gen_steps += 1
-                                continue
+                        if self.config.trainer.align_batch:
+                            prompt_bsz = self.config.data.train_batch_size
+                            if num_prompt_in_batch < prompt_bsz:
+                                print(f"{num_prompt_in_batch=} < {prompt_bsz=}")
+                                max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
+                                if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
+                                    print(f"{num_gen_batches=}. Keep generating...")
+                                    progress_bar.update(1)
+                                    self.gen_steps += 1
+                                    continue
+                                else:
+                                    raise ValueError(
+                                        f"{num_gen_batches=} >= {max_num_gen_batches=}."
+                                        + " Generated too many. Please check if your data are too difficult."
+                                        + " You could also try set max_num_gen_batches=0 to enable endless trials."
+                                    )
                             else:
-                                raise ValueError(
-                                    f"{num_gen_batches=} >= {max_num_gen_batches=}."
-                                    + " Generated too many. Please check if your data are too difficult."
-                                    + " You could also try set max_num_gen_batches=0 to enable endless trials."
-                                )
+                                # Align the batch
+                                traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
+                                original_traj_bsz = len(batch)
+                                batch = batch[:traj_bsz]
+                                aligned_batch_size = len(batch)
+                                print(f"Aligned batch size: {aligned_batch_size} from original {original_traj_bsz}")
                         else:
-                            # Align the batch
-                            traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
-                            original_traj_bsz = len(batch)
-                            batch = batch[:traj_bsz]
-                            aligned_batch_size = len(batch)
-                            print(f"Aligned batch size: {aligned_batch_size} from original {original_traj_bsz}")
+                            rest = len(batch) % self.actor_rollout_wg.world_size
+                            if rest != 0:
+                                batch = batch[: len(batch) - rest]
 
                     # === Updating ===
 
@@ -378,6 +383,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                 timing_raw = defaultdict(float)  # clear timing
 
                 metrics["train/num_gen_batches"] = num_gen_batches
+                metrics["train/batch_size"] = len(batch)
                 batch = None
                 num_prompt_in_batch = 0
                 num_gen_batches = 0

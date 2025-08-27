@@ -2,7 +2,7 @@
 set -xeuo pipefail
 
 project_name='Qwen3-4B-WITH-DS-N-16'
-exp_name='EPPO-256x2x16'
+exp_name='EPPO-512x1x16-EG'
 
 adv_estimator=eppo
 
@@ -25,17 +25,17 @@ loss_agg_mode="token-mean"
 enable_filter_groups=True
 filter_groups_metric=acc
 max_num_gen_batches=10
-train_prompt_bsz=256
+train_prompt_bsz=512
 gen_prompt_bsz=$((train_prompt_bsz * 3))
 n_resp_per_prompt=16
-top_entropy=2
+top_entropy=1
 train_prompt_mini_bsz=32
 
 # Ray
 RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
 WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
-NNODES=${NNODES:-8}
+NNODES=${NNODES:-16}
 # Paths
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}"}
 MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3-4B"}
@@ -101,7 +101,7 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.80 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
@@ -109,7 +109,6 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     actor_rollout_ref.rollout.top_p=${top_p} \
     actor_rollout_ref.rollout.top_k="${top_k}" \
     actor_rollout_ref.rollout.enable_thinking="${enable_thinking}" \
-    actor_rollout_ref.rollout.group_entropy=False \
     actor_rollout_ref.rollout.val_kwargs.temperature=${temperature} \
     actor_rollout_ref.rollout.val_kwargs.top_p=${val_top_p} \
     actor_rollout_ref.rollout.val_kwargs.top_k=${top_k} \
@@ -132,7 +131,7 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     trainer.val_before_train=True \
     trainer.test_freq=5 \
     trainer.save_freq=5 \
-    trainer.total_epochs=6 \
+    trainer.total_epochs=12 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
     trainer.validation_data_dir="${RAY_DATA_HOME}/validation/${project_name}/${exp_name}" \

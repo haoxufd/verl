@@ -22,11 +22,11 @@ overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
 
-enable_filter_groups=False
+enable_filter_groups=True
 filter_groups_metric=acc
 max_num_gen_batches=10
 train_prompt_bsz=4
-gen_prompt_bsz=$((train_prompt_bsz * 3))
+gen_prompt_bsz=$((train_prompt_bsz * 4))
 n_resp_per_prompt=4
 top_entropy=2
 train_prompt_mini_bsz=32
@@ -35,7 +35,7 @@ train_prompt_mini_bsz=32
 RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
 WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
-NNODES=${NNODES:-1}
+NNODES=${NNODES:-2}
 # Paths
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}"}
 MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3-4B"}
@@ -136,3 +136,4 @@ python3 -m recipe.eppo.main_eppo \
     trainer.rollout_data_dir="${RAY_DATA_HOME}/rollout/${project_name}/${exp_name}" \
     trainer.high_entropy_token_dir="${RAY_DATA_HOME}/high_entropy_tokens/${project_name}/${exp_name}" \
     trainer.rollout_data_dir="${RAY_DATA_HOME}/rollout/${project_name}/${exp_name}" \
+    trainer.balance_batch=False \
