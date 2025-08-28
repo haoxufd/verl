@@ -109,4 +109,5 @@ datagen:
   name: null
 
 # Additional kwargs when calling tokenizer.apply_chat_template
-apply_chat_template_kwargs: {}
+apply_chat_template_kwargs:
+  enable_thinking: true
