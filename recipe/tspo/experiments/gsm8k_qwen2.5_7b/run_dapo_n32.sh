@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-project_name='DAPO-GSM8K'
-exp_name='N16'
+project_name='TSPOvsDAPO-Qwen2.5-7B'
+exp_name='DAPO-32'
 
 adv_estimator=grpo
 
@@ -25,9 +25,9 @@ loss_agg_mode="token-mean"
 enable_filter_groups=True
 filter_groups_metric=acc
 max_num_gen_batches=10
-train_prompt_bsz=512
+train_prompt_bsz=256
 gen_prompt_bsz=$((train_prompt_bsz * 2))
-n_resp_per_prompt=16
+n_resp_per_prompt=32
 train_prompt_mini_bsz=32
 
 # Ray
@@ -36,10 +36,10 @@ WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
 NNODES=${NNODES:-8}
 # Paths
-MODEL_PATH=${MODEL_PATH:-"${HOME}/models/Llama-3.2-3B-Instruct"}
+MODEL_PATH=${MODEL_PATH:-"${HOME}/models/Qwen2.5-7B"}
 CKPTS_DIR=${CKPTS_DIR:-"${HOME}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${HOME}/data/gsm8k/train.parquet"}
-TEST_FILE=${TEST_FILE:-"${HOME}/data/gsm8k/test.parquet"}
+TRAIN_FILE=${TRAIN_FILE:-"${HOME}/data/gsm8k/train-step-split.parquet"}
+TEST_FILE=${TEST_FILE:-"${HOME}/data/gsm8k/test-step-split.parquet"}
 
 # Algorithm
 temperature=1.0
@@ -123,10 +123,10 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes="${NNODES}" \
-    trainer.val_before_train=True \
-    trainer.test_freq=5 \
+    trainer.val_before_train=False \
+    trainer.test_freq=1 \
     trainer.save_freq=5 \
-    trainer.total_epochs=10 \
+    trainer.total_epochs=100 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
-    trainer.validation_data_dir="${HOME}/validation/${project_name}/${exp_name}"
+    trainer.validation_data_dir="${HOME}/validation/${project_name}/${exp_name}" \

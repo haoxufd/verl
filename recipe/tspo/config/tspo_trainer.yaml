@@ -23,6 +23,16 @@ algorithm:
     enable: False # We try to avoid forgetting to set enable
     metric: null # acc / score / seq_reward / seq_final_reward / ...
     max_num_gen_batches: 0 # Non-positive values mean no upper limit
+  step_split_mode: average
 
 trainer:
   project_name: verl-dapo
+  sampling_tree_dir: null
+  wandb_run_id: null
+
+actor_rollout_ref:
+  sampling_tree:
+    tree_max_depth: 5
+    tree_order_list: [2,2,2,2,2]
+    align_depth: False
+    step_split_pattern: "#*\\s*(?:Step\\s+(?P<num1>\\d+):|第(?P<num2>[一二三四五六七八九十百零〇\\d]+)步：|(?P<num3>[一二三四五六七八九十百零〇\\d]+)、)"

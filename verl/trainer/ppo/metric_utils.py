@@ -296,7 +296,7 @@ def compute_throughout_metrics(batch: DataProto, timing_raw: dict[str, float], n
     # f'Actual TFLOPs/s/GPU​': estimated_flops/(n_gpus),
     # f'Theoretical TFLOPs/s/GPU​': promised_flops,
     return {
-        "perf/total_num_tokens": total_num_tokens,
+        "perf/total_num_tokens": total_num_tokens if "real_response_length" not in batch.non_tensor_batch.keys() else batch.non_tensor_batch["real_response_length"].sum() + batch.batch["attention_mask"][: , : batch.batch["prompts"].shape[1]].sum().item(),
         "perf/time_per_step": time,
         "perf/throughput": total_num_tokens / (time * n_gpus),
     }

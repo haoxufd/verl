@@ -135,6 +135,22 @@ class RolloutWorker(Worker):
 
         output = self.rollout.generate_sequences(prompts=prompts)
         return output
+    
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="infer"))
+    def generate_sequences_tspo(self, prompts: DataProto):
+        """Given a batch of prompts, return a batch of responses. Internally, it can use"""
+        meta_info = {
+            "eos_token_id": self.model_config.generation_config.eos_token_id
+            if self.model_config.generation_config is not None
+            else self.model_config.tokenizer.eos_token_id,
+            "pad_token_id": self.model_config.generation_config.pad_token_id
+            if self.model_config.generation_config is not None
+            else self.model_config.tokenizer.pad_token_id,
+        }
+        prompts.meta_info.update(meta_info)
+
+        output = self.rollout.generate_sequences_tspo(prompts=prompts)
+        return output
 
     # ============================ vLLM related ============================
 

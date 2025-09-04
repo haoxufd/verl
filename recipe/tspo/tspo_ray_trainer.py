@@ -35,19 +35,20 @@ from verl.trainer.ppo.metric_utils import (
     reduce_metrics,
 )
 from verl.trainer.ppo.ray_trainer import (
-    AdvantageEstimator,
     RayPPOTrainer,
     apply_kl_penalty,
     compute_advantage,
     compute_response_mask,
 )
+from verl.trainer.ppo.core_algos import AdvantageEstimator
 from verl.utils.profiler import marked_timer
 from verl.utils.rollout_skip import RolloutSkip
 
 from recipe.tspo.sampling_tree import build_sampling_trees
+from recipe.dapo.dapo_ray_trainer import RayDAPOTrainer
 
 
-class RayTSPOTrainer(RayPPOTrainer):
+class RayTSPOTrainer(RayDAPOTrainer):
     """
     Note that this trainer runs on the driver process on a single CPU/GPU node.
     """
@@ -91,7 +92,7 @@ class RayTSPOTrainer(RayPPOTrainer):
             rollout_skip.wrap_generate_sequences()
 
         # add tqdm
-        progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
+        progress_bar = tqdm(total=self.total_training_steps, initial=self.gen_steps, desc="Training Progress")
 
         # we start from step 1
         self.global_steps += 1
@@ -145,11 +146,25 @@ class RayTSPOTrainer(RayPPOTrainer):
                         # timing_raw.update(gen_batch_output.meta_info["timing"])
                         # gen_batch_output.meta_info.pop("timing", None)
                         trees = build_sampling_trees(batch_dict, self.actor_rollout_wg, self.tokenizer, self.config)
+                    
+                    with marked_timer("reward", timing_raw, "yellow"):
+                        for tree in trees:
+                            tree.compute_scores(self.reward_fn)
+                    
+                    with marked_timer("adv", timing_raw, "brown"):
+                        for tree in trees:
+                            tree.compute_advantages()
+                    
+                    for tree in trees:
+                        tree.store_plain_text_content(self.tokenizer)
+                    
+                    if self.config.trainer.sampling_tree_dir:
+                        for i, tree in enumerate(trees):
+                            tree_file = os.path.join(self.config.trainer.sampling_tree_dir, f"gen_step_{self.gen_steps}/tree_{i}.html")
+                            tree.visualize(tree_file)
 
                     new_batch_list = []
                     for tree in trees:
-                        tree.compute_scores(self.reward_fn)
-                        tree.compute_advantages()
                         new_batch_list.append(tree.collect_batch())
                     new_batch = DataProto.concat(new_batch_list)
 
@@ -252,12 +267,18 @@ class RayTSPOTrainer(RayPPOTrainer):
                             if traj_from_prompt_uid in kept_prompt_uids:
                                 kept_traj_idxs.append(idx)
 
+                        num_generated_tokens = new_batch.non_tensor_batch["real_response_length"].sum()
                         new_batch = new_batch[kept_traj_idxs]
-                        batch = new_batch if batch is None else DataProto.concat([batch, new_batch])
+                        if batch is None:
+                            batch = new_batch
+                            batch.meta_info["num_generated_tokens"] = num_generated_tokens
+                        else:
+                            batch = DataProto.concat([batch, new_batch])
+                            batch.meta_info["num_generated_tokens"] += num_generated_tokens
 
-                        prompt_bsz = self.config.data.train_batch_size
-                        if num_prompt_in_batch < prompt_bsz:
-                            print(f"{num_prompt_in_batch=} < {prompt_bsz=}")
+                        expected_batch_size = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
+                        if len(batch) < expected_batch_size:
+                            print(f"{len(batch)=} < {expected_batch_size=}")
                             max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
                             if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
                                 print(f"{num_gen_batches=}. Keep generating...")
@@ -274,7 +295,7 @@ class RayTSPOTrainer(RayPPOTrainer):
                         else:
                             # Align the batch
                             traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
-                            batch = batch[:traj_bsz]
+                            batch = batch[:expected_batch_size]
 
                     # === Updating ===
 
@@ -285,11 +306,13 @@ class RayTSPOTrainer(RayPPOTrainer):
                     # which won't affect the advantage calculation (since it's based on uid),
                     # but might affect the loss calculation (due to the change of mini-batching).
                     # TODO: Decouple the DP balancing and mini-batching.
+                    world_size = self.actor_rollout_wg.world_size
+                    batch.padding(world_size - len(batch) % world_size)
                     if self.config.trainer.balance_batch:
                         self._balance_batch(batch, metrics=metrics)
 
                     # compute global_valid tokens
-                    # batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+                    batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
                     # recompute old_log_probs
                     with marked_timer("old_log_prob", timing_raw, "blue"):

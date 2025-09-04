@@ -154,6 +154,7 @@ class TaskRunner:
             0,
             max_resp_len=config.data.max_response_length,
             overlong_buffer_cfg=config.reward_model.overlong_buffer,
+            step_split_pattern=config.actor_rollout_ref.sampling_tree.step_split_pattern,
         )
 
         # Note that we always use function-based RM for validation
@@ -166,7 +167,7 @@ class TaskRunner:
         )
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
-        trainer = RayEASPOTrainer(
+        trainer = RayTSPOTrainer(
             config=config,
             tokenizer=tokenizer,
             processor=processor,
