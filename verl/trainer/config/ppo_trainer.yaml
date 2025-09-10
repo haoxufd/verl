@@ -265,6 +265,8 @@ trainer:
   #  mode: "auto", "enable", or "disable"
   use_legacy_worker_impl: auto
 
+  wandb_run_id: null
+
 
 # profiler configs
 global_profiler:

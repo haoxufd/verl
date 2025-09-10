@@ -28,6 +28,7 @@ algorithm:
 trainer:
   project_name: verl-dapo
   sampling_tree_dir: null
+  wandb_run_id: null
 
 actor_rollout_ref:
   sampling_tree:
@@ -35,3 +36,6 @@ actor_rollout_ref:
     tree_order_list: [2,2,2,2,2]
     align_depth: False
     step_split_pattern: "#*\\s*(?:Step\\s+(?P<num1>\\d+):|第(?P<num2>[一二三四五六七八九十百零〇\\d]+)步：|(?P<num3>[一二三四五六七八九十百零〇\\d]+)、)"
+
+verifier:
+  ckpt: null

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-project_name='TSPOvsDAPO-Qwen3-4B-MATH-17K'
-exp_name='TEST'
+project_name='VERIFY'
+exp_name='Qwen3-4B-TSPO-Step-110'
 
 adv_estimator=grpo
 
@@ -30,14 +30,18 @@ gen_prompt_bsz=$((train_prompt_bsz * 2))
 n_resp_per_prompt=32
 train_prompt_mini_bsz=32
 
+target_project="TSPOvsDAPO-Qwen3-4B-MATH-17K"
+target_exp="TSPO-4x2x2x2-Smt-StepReward"
+target_step=110
+
 # Ray
 RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
 WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
 NNODES=${NNODES:-4}
 # Paths
-MODEL_PATH=${MODEL_PATH:-"${HOME}/models/Qwen3-4B"}
-CKPTS_DIR=${CKPTS_DIR:-"${HOME}/ckpts/${project_name}/${exp_name}"}
+MODEL_PATH=${MODEL_PATH:-"${HOME}/ckpts/${target_project}/${target_exp}/global_step_${target_step}/actor/merged_hf_model"}
+CKPTS_DIR=${CKPTS_DIR:-"${HOME}/ckpts/TSPOvsDAPO-Qwen3-4B-MATH-17K/TSPO-4x2x2x2-Smt-StepReward"}
 TRAIN_FILE=${TRAIN_FILE:-"${HOME}/data/dapo-math-17k.parquet"}
 TEST_FILE=${TEST_FILE:-"${HOME}/data/aime-2024.parquet"}
 
@@ -55,12 +59,7 @@ infer_ppo_max_token_len=$((max_prompt_length + max_response_length))
 offload=True
 gen_tp=1
 
-tree_max_depth=4
-tree_order_list="[4,2,2,2]"
-align_depth=False
-step_split_mode="semantic"
-
-python3 -m recipe.tspo.main_tspo \
+python3 -m recipe.tspo.main_verifier \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \
@@ -74,7 +73,6 @@ python3 -m recipe.tspo.main_tspo \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
-    algorithm.step_split_mode=${step_split_mode} \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
     actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \
@@ -115,13 +113,10 @@ python3 -m recipe.tspo.main_tspo \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.n=16 \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.sampling_tree.tree_max_depth=${tree_max_depth} \
-    actor_rollout_ref.sampling_tree.tree_order_list=${tree_order_list} \
-    actor_rollout_ref.sampling_tree.align_depth=${align_depth} \
     actor_rollout_ref.ref.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=-1 \
-    reward_model.reward_manager=tspo \
+    reward_model.reward_manager=verifier \
     reward_model.overlong_buffer.enable=${enable_overlong_buffer} \
     reward_model.overlong_buffer.len=${overlong_buffer_len} \
     reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor} \
@@ -133,6 +128,8 @@ python3 -m recipe.tspo.main_tspo \
     trainer.val_before_train=True \
     trainer.test_freq=5 \
     trainer.save_freq=5 \
-    trainer.total_epochs=100 \
+    trainer.total_epochs=1 \
     trainer.default_local_dir="${CKPTS_DIR}" \
-    trainer.resume_mode=auto \
+    trainer.resume_mode=disable \
+    trainer.validation_data_dir="${HOME}/validation/${project_name}/${exp_name}" \
+    verifier.ckpt="${target_step}" \

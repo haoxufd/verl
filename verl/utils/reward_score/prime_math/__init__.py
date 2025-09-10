@@ -386,7 +386,7 @@ def match_answer(response):
     return is_matched, response
 
 
-def compute_score(model_output: str, ground_truth: str) -> bool:
+def compute_score(model_output: str, ground_truth: str):
     model_output = str(model_output)
     ground_truth = str(ground_truth)
 
