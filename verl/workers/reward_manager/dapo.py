@@ -119,6 +119,8 @@ class DAPORewardManager(AbstractRewardManager):
                 exceed_len = valid_response_length - expected_len
                 overlong_penalty_factor = self.overlong_buffer_cfg.penalty_factor
                 overlong_reward = min(-exceed_len / overlong_buffer_len * overlong_penalty_factor, 0)
+                if isinstance(overlong_reward, torch.Tensor):
+                    overlong_reward = overlong_reward.item()
                 reward += overlong_reward
                 if self.overlong_buffer_cfg.log:
                     reward_extra_info["overlong_reward"].append(overlong_reward)

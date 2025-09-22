@@ -7,6 +7,7 @@ import numpy as np
 import math
 from collections import defaultdict
 
+
 def _plot_hist(data: list[float], title: str, bin_width: float, show_freq: bool, save_path: str):
     plt.figure()
 
@@ -81,7 +82,6 @@ def _plot_two_hists_in_one_figure(
     print(f"Image has been saved to: {save_path}")
 
     plt.close()
-
 
 
 class SolutionStats:
@@ -261,7 +261,38 @@ def calc_problem_attributes_of_step(gen_step_dir):
     print(f"Saved accs file to {accs_file}")
 
 
+def show_high_entropy_tokens_of_solution(data: dict, top_k: int, save_path: str | None = None):
+    indices = np.argsort(data["entropy"])[-top_k:][::-1]
+
+    res = []
+    for idx in indices:
+        context_start = idx - 10 if idx - 10 >= 0 else 0
+        context_end = idx + 10 if idx + 10 <= len(data["output"]) else len(data["output"])
+        context = data["output"][context_start:context_end]
+        ctxt_entropy = [round(float(x), 4) for x in data["entropy"][context_start:context_end]]
+        res.append({
+            "index": int(idx),
+            "token": data["output"][idx],
+            "entropy": round(float(data["entropy"][idx]), 4),
+            "log_prob": round(float(data["log_prob"][idx]), 4),
+            "context": context,
+            "ctxt_entropy": ctxt_entropy,
+            "candidates": data["candidate_tokens"][idx],
+            "candidate_log_probs": [round(float(lp), 4) for lp in data["candidate_log_probs"][idx]],
+        })
+    
+    if save_path is not None:
+        with open(save_path, 'w', encoding='utf-8') as f:
+            json.dump(res, f, indent=2, ensure_ascii=False)
+        print(f"High entropy tokens have been saved to: {save_path}")
+
+    return res
+
+
 
 if __name__ == "__main__":
-    gen_step_dir = "/user/hxu4/u16813/sampling_tree/TSPOvsDAPO-Qwen3-4B-MATH-17K/TSPO-4x2x2x2-Smt-SR-SA/gen_step_1"
-    calc_solution_attributes_of_gen_step(gen_step_dir)
+    with open("/user/hxu4/u16814/rollout/COLLECT_DATA/DAPO-32/1_top10.jsonl", 'r') as f:
+        lines = json.load(f)
+    
+    print(lines[0]["input"])
+    print("".join(lines[0]["output"]))

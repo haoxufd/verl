@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-project_name='TSPOvsDAPO-Qwen3-4B-MATH-17K'
-exp_name='DAPO-32'
+project_name='VERIFY-RESUME'
+exp_name='Qwen3-4B-TSPO-Step-110'
 
 adv_estimator=grpo
 
@@ -30,14 +30,18 @@ gen_prompt_bsz=$((train_prompt_bsz * 2))
 n_resp_per_prompt=32
 train_prompt_mini_bsz=32
 
+target_project="TSPOvsDAPO-Qwen3-4B-MATH-17K"
+target_exp="TSPO-4x2x2x2-Smt-StepReward"
+target_step=110
+
 # Ray
 RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
 WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
-NNODES=${NNODES:-8}
+NNODES=${NNODES:-16}
 # Paths
 MODEL_PATH=${MODEL_PATH:-"${HOME}/models/Qwen3-4B"}
-CKPTS_DIR=${CKPTS_DIR:-"${HOME}/ckpts/${project_name}/${exp_name}"}
+CKPTS_DIR=${CKPTS_DIR:-"${HOME}/ckpts/${target_project}/${target_exp}"}
 TRAIN_FILE=${TRAIN_FILE:-"${HOME}/data/dapo-math-17k.parquet"}
 TEST_FILE=${TEST_FILE:-"${HOME}/data/aime-2024.parquet"}
 
@@ -55,9 +59,7 @@ infer_ppo_max_token_len=$((max_prompt_length + max_response_length))
 offload=True
 gen_tp=1
 
-ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
-    --working-dir "${WORKING_DIR}" \
-    -- python3 -m recipe.dapo.main_dapo \
+python3 -m recipe.tspo.main_verifier \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \
@@ -114,12 +116,11 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     actor_rollout_ref.ref.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=-1 \
-    reward_model.reward_manager=dapo \
+    reward_model.reward_manager=verifier \
     reward_model.overlong_buffer.enable=${enable_overlong_buffer} \
     reward_model.overlong_buffer.len=${overlong_buffer_len} \
     reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor} \
-    trainer.logger='["console","wandb"]' \
-    trainer.wandb_run_id=enm0tumu \
+    trainer.logger='["console"]' \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node=4 \
@@ -127,7 +128,8 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     trainer.val_before_train=True \
     trainer.test_freq=5 \
     trainer.save_freq=5 \
-    trainer.total_epochs=100 \
+    trainer.total_epochs=1 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
     trainer.validation_data_dir="${HOME}/validation/${project_name}/${exp_name}" \
+    verifier.ckpt="${target_step}" \

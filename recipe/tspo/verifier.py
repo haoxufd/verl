@@ -99,7 +99,7 @@ class Verifier(RayPPOTrainer):
             if not os.path.isabs(checkpoint_folder):
                 working_dir = os.getcwd()
                 checkpoint_folder = os.path.join(working_dir, checkpoint_folder)
-            global_step_folder = f"global_step_{self.config.verifier.ckpt}"
+            global_step_folder = os.path.join(checkpoint_folder, f"global_step_{self.config.verifier.ckpt}")
 
         # find global_step_folder
         if self.config.trainer.resume_mode == "auto":

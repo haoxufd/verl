@@ -115,6 +115,7 @@ python3 -m recipe.tspo.main_tspo \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.n=16 \
     actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.sampling_tree.tree_max_depth=${tree_max_depth} \
     actor_rollout_ref.sampling_tree.tree_order_list=${tree_order_list} \
     actor_rollout_ref.sampling_tree.align_depth=${align_depth} \
@@ -136,3 +137,5 @@ python3 -m recipe.tspo.main_tspo \
     trainer.total_epochs=100 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
+    trainer.validation_data_dir="${HOME}/validation/${project_name}/${exp_name}" \
+    trainer.sampling_tree_dir="${HOME}/sampling_tree/${project_name}/${exp_name}" \

@@ -2,7 +2,7 @@
 set -xeuo pipefail
 
 project_name='TSPOvsDAPO-Qwen3-4B-MATH-17K'
-exp_name='TSPO-4x2x2x2-Smt-SR-SA-45'
+exp_name='PAPO-32'
 
 adv_estimator=grpo
 
@@ -28,15 +28,17 @@ max_num_gen_batches=10
 train_prompt_bsz=256
 gen_prompt_bsz=$((train_prompt_bsz * 2))
 n_resp_per_prompt=32
+warmup_n=4
+max_n=256
 train_prompt_mini_bsz=32
 
 # Ray
 RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
 WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
-NNODES=${NNODES:-8}
+NNODES=${NNODES:-16}
 # Paths
-MODEL_PATH=${MODEL_PATH:-"${HOME}/ckpts/TSPOvsDAPO-Qwen3-4B-MATH-17K/TSPO-4x2x2x2-Smt-SR-SA/global_step_45/merged_hf_model"}
+MODEL_PATH=${MODEL_PATH:-"${HOME}/models/Qwen3-4B"}
 CKPTS_DIR=${CKPTS_DIR:-"${HOME}/ckpts/${project_name}/${exp_name}"}
 TRAIN_FILE=${TRAIN_FILE:-"${HOME}/data/dapo-math-17k.parquet"}
 TEST_FILE=${TEST_FILE:-"${HOME}/data/aime-2024.parquet"}
@@ -55,14 +57,9 @@ infer_ppo_max_token_len=$((max_prompt_length + max_response_length))
 offload=True
 gen_tp=1
 
-tree_max_depth=4
-tree_order_list="[4,2,2,2]"
-align_depth=False
-step_split_mode="semantic"
-
 ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     --working-dir "${WORKING_DIR}" \
-    -- python3 -m recipe.tspo.main_tspo \
+    -- python3 -m recipe.papo.main_papo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \
@@ -73,10 +70,11 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     data.train_batch_size=${train_prompt_bsz} \
     data.apply_chat_template_kwargs.enable_thinking=False \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
+    actor_rollout_ref.rollout.warmup_n=${warmup_n} \
+    actor_rollout_ref.rollout.max_n=${max_n} \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
-    algorithm.step_split_mode=${step_split_mode} \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
     actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \
@@ -117,18 +115,16 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.n=16 \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.calculate_log_probs=True \
-    actor_rollout_ref.sampling_tree.tree_max_depth=${tree_max_depth} \
-    actor_rollout_ref.sampling_tree.tree_order_list=${tree_order_list} \
-    actor_rollout_ref.sampling_tree.align_depth=${align_depth} \
     actor_rollout_ref.ref.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=-1 \
-    reward_model.reward_manager=tspo \
+    reward_model.reward_manager=dapo \
     reward_model.overlong_buffer.enable=${enable_overlong_buffer} \
     reward_model.overlong_buffer.len=${overlong_buffer_len} \
     reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor} \
+    reward_model.overlong_buffer.log=True \
     trainer.logger='["console","wandb"]' \
+    trainer.wandb_run_id=l6j5h02u \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node=4 \
@@ -140,4 +136,4 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
     trainer.validation_data_dir="${HOME}/validation/${project_name}/${exp_name}" \
-    trainer.sampling_tree_dir="${HOME}/sampling_tree/${project_name}/${exp_name}" \
+    trainer.sample_dist_dir="${HOME}/sample_dist/${project_name}/${exp_name}" \

@@ -6,7 +6,7 @@ from verl import DataProto
 
 import json
 from pathlib import Path
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List
 
 import os
 
@@ -18,6 +18,15 @@ from verl.protocol import DataProtoItem
 import uuid
 import re
 
+import math
+
+def split_integer(a: int, x: int) -> list[int]:
+    base = a // x
+    remainder = a % x
+    result = [base] * x
+    for i in range(remainder):
+        result[i] += 1
+    return result
 
 class ChildrenFullError(Exception):
     """
@@ -47,7 +56,9 @@ class Node:
     
     def __init__(self, 
                  token_sequence: List[int], 
-                 max_children: int) -> None:
+                 max_children: int,
+                 log_prob: List[float] | None=None,
+                 entropy: List[float] | None=None) -> None:
         self.token_sequence = token_sequence
         self.max_children = max_children
         self.text : Optional[str] = None
@@ -62,6 +73,13 @@ class Node:
         self.gen_batch_output_item : Optional[DataProtoItem] = None
         self.acc : Optional[bool] = None
         self.is_visited : bool = False
+        self.leaf_node_num : Optional[int] = None
+        self.log_prob = log_prob
+        if self.log_prob is not None:
+            self.perplexity = math.exp(-sum(self.log_prob) / len(self.log_prob))
+        self.entropy = entropy
+        if self.entropy is not None:
+            self.avg_entropy = sum(self.entropy) / len(self.entropy)
     
     def add_child(self, child_node):
         # Check if the node can accept more children
@@ -118,7 +136,8 @@ class SamplingTree:
         self.batch : Optional[DataProto] = None
         self.leaf_nodes : Optional[List[Node]] = None
         
-        assert len(self.order_list) == self.max_depth
+        if self.order_list is not None and self.max_depth is not None:
+            assert len(self.order_list) == self.max_depth
     
     def add_node(self, node1: Node, node2: Node):
         node1.add_child(node2)
@@ -138,37 +157,32 @@ class SamplingTree:
         assert node.token_state is not None
         real_response_start = len(node.token_state) - len(self.root.token_sequence)
         response = gen_batch_output_item.batch["responses"][real_response_start : response_len].tolist()
+        log_probs = gen_batch_output_item.batch["rollout_log_probs"][real_response_start : response_len].tolist()
+        entropys = gen_batch_output_item.batch["entropys"][real_response_start : response_len].tolist()
         
         if self.step_split_mode == "average":
             segment_len = len(response) // max_added_depth
             split_positions = [segment_len * i for i in range(1, max_added_depth)]
         elif self.step_split_mode == "semantic":
-            split_positions = find_step_start_token_positions(response, tokenizer, self.step_split_pattern)
-            if len(split_positions) > 0:
-                split_positions = split_positions[1:]
-            if len(split_positions) + 1 > max_added_depth:
-                num_kept_positions = max_added_depth - 1
-                if num_kept_positions > 0:
-                    delta = len(split_positions) // num_kept_positions
-                    kept_positions = [split_positions[i * delta] for i in range(num_kept_positions)]
-                    split_positions = kept_positions
-                else:
-                    split_positions = []
-            if len(split_positions) + 1 < max_added_depth and self.align_depth:
-                start_pos = 0 if len(split_positions) == 0 else split_positions[-1] + 1
-                delta = (len(response) - start_pos) // max_added_depth
-                num_to_be_added = max_added_depth - (len(split_positions) + 1)
-                for i in range(1, num_to_be_added + 1):
-                    split_positions.append(start_pos + delta * i)
+            step_start_positions = find_step_start_token_positions(response, tokenizer, self.step_split_pattern)
+            num_steps = len(step_start_positions) if len(step_start_positions) > 0 else 1
+            if num_steps > max_added_depth:
+                num_steps_per_depth = split_integer(num_steps, max_added_depth)
+                split_positions = [sum(num_steps_per_depth[:i]) for i in range(1, max_added_depth)]
+                split_positions = [step_start_positions[idx] for idx in split_positions]
+            else:
+                split_positions = step_start_positions[1:] if len(step_start_positions) > 1 else []
         else:
             raise NotImplementedError("No other step split modes except for average and semantic")
         
         added_depth = len(split_positions) + 1
         segments = split_list_by_positions(response, split_positions)
+        log_prob_segments = split_list_by_positions(log_probs, split_positions)
+        entropys_segments = split_list_by_positions(entropys, split_positions)
         path = []
         for i in range(1, added_depth + 1):
             max_children = self.order_list[node.depth + i] if i < added_depth else 0
-            path.append(Node(segments[i - 1], max_children))
+            path.append(Node(segments[i - 1], max_children, log_prob_segments[i - 1], entropys_segments[i - 1]))
 
         gen_batch_output_item.non_tensor_batch["real_response_length"] = len(response)
         
@@ -203,10 +217,7 @@ class SamplingTree:
     def _collect_batch(self):
         assert self.leaf_nodes is not None
         gen_batch_output_items = [node.gen_batch_output_item for node in self.leaf_nodes]
-        try:
-            gen_batch_output = collate_fn(gen_batch_output_items)
-        except AttributeError as e:
-            breakpoint()
+        gen_batch_output = collate_fn(gen_batch_output_items)
 
         batch = self.question_info
         batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4())])
@@ -222,6 +233,7 @@ class SamplingTree:
     
     def _compute_scores(self, node: Node):
         if node.children == []:
+            node.leaf_node_num = 1
             return 1, node.score
 
         # Num of leaf nodes for each subtree
@@ -234,6 +246,7 @@ class SamplingTree:
             scores.append(score)
 
         node.score = sum(scores) / sum(leaf_node_nums)
+        node.leaf_node_num = sum(leaf_node_nums)
 
         return sum(leaf_node_nums), sum(scores)
     
@@ -263,27 +276,14 @@ class SamplingTree:
         self._compute_scores(self.root)
     
     def _compute_advantages(self, node: Node):
-        if node.children == []:
-            return
-        
-        assert node.children_is_full
-
-        if len(node.children) == 1:
-            node.children[0].advantage = 0
-        else:
-            scores = np.array([_node.score for _node in node.children])
-            mean = np.mean(scores)
-            std = np.std(scores, ddof=1)
-            advantages = ((scores - mean) / (std + 1e-6)).tolist()
-
-            for i, child in enumerate(node.children):
-                child.advantage = advantages[i]
-
-        for i, child in enumerate(node.children):
-            child.advantage = advantages[i]
+        if node.parent is not None:
+            assert node.score is not None and node.parent.score is not None and self.root.score is not None
+            assert node.leaf_node_num is not None
+            node.advantage = (node.score - node.parent.score + node.score - self.root.score) / math.sqrt(node.leaf_node_num)
         
         for child in node.children:
             self._compute_advantages(child)
+
         
     def compute_advantages(self):
         """
@@ -301,9 +301,7 @@ class SamplingTree:
 
             advantage = []
             for node in path:
-                adv = 0 if node.is_visited else node.advantage
-                advantage.extend([adv for _ in range(len(node.token_sequence))])
-                node.is_visited = True
+                advantage.extend([node.advantage for _ in range(len(node.token_sequence))])
             
             assert len(advantage) == response_len[i]
             
@@ -322,6 +320,75 @@ class SamplingTree:
         for node in self.all_nodes:
             node.text = tokenizer.decode(node.token_sequence)
             node.text_state = tokenizer.decode(node.token_state)
+    
+    def dump_json(self, output_file):
+        tree_data = self._tree_to_json()
+        
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(tree_data, f, ensure_ascii=False, indent=2)
+    
+    @classmethod
+    def from_json(cls,
+                  json_file: str) -> "SamplingTree":
+        with open(json_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        tree_data = data["tree_data"]
+
+        def build_node(node_dict, parent=None):
+            node = Node(
+                token_sequence=node_dict["token_sequence"],
+                max_children=len(node_dict["children"]) if not node_dict["is_leaf"] else 0,
+                log_prob=node_dict.get("log_prob"),
+                entropy=node_dict.get("entropy")
+            )
+            node.text = node_dict.get("full_text")
+            node.depth = node_dict.get("depth")
+            node.parent = parent
+            node.score = node_dict.get("score")
+            node.advantage = node_dict.get("advantage")
+            node.acc = node_dict.get("acc")
+            node.perplexity = node_dict.get("perplexity")
+            node.avg_entropy = node_dict.get("avg_entropy")
+            node.is_root = node_dict.get("is_root", False)
+            node.is_leaf = node_dict.get("is_leaf", False)
+
+            # 递归处理子节点
+            for child_dict in node_dict["children"]:
+                child_node = build_node(child_dict, parent=node)
+                node.children.append(child_node)
+
+            node.children_is_full = (len(node.children) >= node.max_children)
+            return node
+
+        root_node = build_node(tree_data)
+
+        tree = cls(
+            root_node=root_node,
+            order_list=None,
+            max_depth=None,
+            align_depth=None,
+            question_info=None,
+            max_prompt_length=None,
+            max_response_length=None,
+            pad_token_id=None,
+            step_split_mode=None,
+            step_split_pattern=None,
+        )
+
+        # 补全 all_nodes
+        def collect_all_nodes(node):
+            nodes = [node]
+            for child in node.children:
+                nodes.extend(collect_all_nodes(child))
+            return nodes
+
+        tree.all_nodes = collect_all_nodes(root_node)
+        tree.leaf_nodes = [node for node in tree.all_nodes if node.children == []]
+
+        return tree
 
     def visualize(self, output_file):
         tree_data = self._tree_to_json()
@@ -344,6 +411,10 @@ class SamplingTree:
                 "is_root": node.parent is None,
                 "is_leaf": node.children == [],
                 "acc": node.acc,
+                "perplexity": node.perplexity if hasattr(node, 'perplexity') else None,
+                "avg_entropy": node.avg_entropy if hasattr(node, 'avg_entropy') else None,
+                "log_prob": node.log_prob if node.log_prob is not None else None,
+                "entropy": node.entropy if node.entropy is not None else None,
                 "children": []
             }
             
@@ -377,10 +448,7 @@ class SamplingTree:
         with open(template_path, 'r', encoding='utf-8') as f:
             template = f.read()
         
-        try:
-            tree_json = json.dumps(tree_data, ensure_ascii=False, indent=2)
-        except TypeError as e:
-            breakpoint()
+        tree_json = json.dumps(tree_data, ensure_ascii=False, indent=2)
         html_content = template.replace('{tree_json}', tree_json)
         
         return html_content
@@ -423,17 +491,19 @@ def build_sampling_trees(batch_dict, actor_rollout_wg, tokenizer, config):
         
         if len(gen_batch_list) == 0:
             break
-        
-        try:
-            gen_batch = DataProto.concat(gen_batch_list)
-        except ValueError as w:
-            breakpoint()
+
+        gen_batch = DataProto.concat(gen_batch_list)
         sampling_points = gen_batch.pop(non_tensor_batch_keys=["sampling_points"]).non_tensor_batch["sampling_points"].tolist()
 
         world_size = actor_rollout_wg.world_size
-        padding_size = world_size - len(gen_batch) % world_size
+        padding_size = world_size - len(gen_batch) % world_size if len(gen_batch) % world_size != 0 else 0
         gen_batch.padding(padding_size, "last")
         gen_batch_output = actor_rollout_wg.generate_sequences_tspo(gen_batch)
+
+        log_probs = actor_rollout_wg.compute_log_prob(gen_batch_output)
+        entropys = log_probs.batch["entropys"]
+        gen_batch_output.batch["entropys"] = entropys
+
         gen_batch_output = gen_batch_output[: len(gen_batch_output) - padding_size]
 
         for i in range(len(gen_batch_output)):

@@ -876,6 +876,57 @@ class DataProto:
             non_tensor_batch=repeated_non_tensor_batch,
             meta_info=self.meta_info,
         )
+    
+    def repeat_with_list(self, repeat_list, interleave=True):
+        """
+        Repeat each element in the batch a specified number of times 
+        according to repeat_list.
+
+        Args:
+            repeat_list (list[int]): List of repeat counts for each element.
+            interleave (bool): Whether to interleave the repeated data.
+
+        Returns:
+            DataProto: A new DataProto with repeated data.
+        """
+        if self.batch is not None:
+            repeated_tensors = {}
+            for key, tensor in self.batch.items():
+                if interleave:
+                    # torch.repeat_interleave 支持传入 list/1D tensor
+                    repeated_tensors[key] = tensor.repeat_interleave(torch.tensor(repeat_list, device=tensor.device), dim=0)
+                else:
+                    # 手动拼接
+                    pieces = []
+                    for t, r in zip(tensor, repeat_list):
+                        if r > 0:
+                            pieces.append(t.unsqueeze(0).expand(r, *t.shape))
+                    repeated_tensors[key] = torch.cat(pieces, dim=0)
+
+            repeated_batch = TensorDict(
+                source=repeated_tensors,
+                batch_size=(sum(repeat_list),),
+            )
+        else:
+            repeated_batch = None
+
+        # 处理 non_tensor_batch
+        repeated_non_tensor_batch = {}
+        for key, val in self.non_tensor_batch.items():
+            if interleave:
+                repeated_non_tensor_batch[key] = np.repeat(val, repeat_list, axis=0)
+            else:
+                pieces = []
+                for v, r in zip(val, repeat_list):
+                    if r > 0:
+                        pieces.append(np.tile(v, (r, *[1] * (val.ndim - 1))))
+                repeated_non_tensor_batch[key] = np.concatenate(pieces, axis=0)
+
+        return type(self)(
+            batch=repeated_batch,
+            non_tensor_batch=repeated_non_tensor_batch,
+            meta_info=self.meta_info,
+        )
 
     def unfold_column_chunks(self, n_split: int, split_keys: Optional[list[str]] = None):
         """Split along the second dim into `n_split`, unfold it to the first dim (batch dim)

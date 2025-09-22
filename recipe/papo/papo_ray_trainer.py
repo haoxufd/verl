@@ -22,6 +22,7 @@ from collections import defaultdict
 from copy import deepcopy
 from pprint import pprint
 
+from networkx import total_spanning_tree_weight
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -46,8 +47,114 @@ from verl.utils.rollout_skip import RolloutSkip
 
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 
+from recipe.dapo.dapo_ray_trainer import RayDAPOTrainer
 
-class RayDAPOTrainer(RayPPOTrainer):
+import json
+
+def allocate_by_perplexity(p, total, min_unit, max_unit, alpha=1.0):
+    """
+    Allocate an integer budget M to N samples based on perplexity values.
+    Each allocation:
+      - Is exponentially related to perplexity
+      - Respects bounds: min_unit <= x[i] <= max_unit
+      - Is integer
+      - Sums exactly to M
+
+    Args:
+      p     : ndarray, shape (N,), perplexity values
+      M     : int, total budget to distribute
+      min_unit : int, minimum allocation per sample
+      max_unit : int, maximum allocation per sample
+      alpha : float, sensitivity parameter (higher = more biased)
+
+    Returns:
+      x     : ndarray, shape (N,), integer allocation result
+    """
+    N = len(p)
+
+    # ---------- Feasibility check ----------
+    if total < N * min_unit or total > N * max_unit:
+        raise ValueError(f"M is infeasible: must be in [{N*min_unit}, {N*max_unit}]")
+
+    # ---------- Normalization (z-score) ----------
+    mean_p = np.mean(p)
+    std_p = np.std(p) if np.std(p) > 1e-12 else 1.0
+    norm_p = (p - mean_p) / std_p
+
+    # ---------- Weight calculation (exponential) ----------
+    w = np.exp(alpha * norm_p)
+
+    # ---------- Initialization ----------
+    x = np.full(N, min_unit, dtype=float)
+    remaining = total - N * min_unit
+    free = set(range(N))
+
+    # ---------- Iterative allocation (float) ----------
+    while free:
+        ws = w[list(free)]
+        idxs = np.array(list(free))
+        denom = ws.sum()
+        if denom <= 1e-12:
+            cand = np.full(len(idxs), remaining / len(idxs))
+        else:
+            cand = remaining * (ws / denom)
+
+        over_mask = x[idxs] + cand > max_unit
+        if not over_mask.any():
+            x[idxs] += cand
+            remaining = 0
+            break
+        else:
+            for i, add_val, is_over in zip(idxs, cand, over_mask):
+                if is_over:
+                    can_add = max_unit - x[i]
+                    x[i] += can_add
+                    remaining -= can_add
+                    free.remove(i)
+
+    # ---------- Convert to integers ----------
+    x = np.floor(x).astype(int)
+
+    # ---------- Fix sum to exactly M ----------
+    diff = total - x.sum()
+    if diff > 0:
+        # Need to add 'diff' units
+        # Prefer samples with largest fractional part and below max_unit
+        candidates = np.argsort(-(p))  # higher perplexity first
+        for i in candidates:
+            if diff == 0:
+                break
+            if x[i] < max_unit:
+                add = min(diff, max_unit - x[i])
+                x[i] += add
+                diff -= add
+    elif diff < 0:
+        # Need to remove '-diff' units
+        # Prefer samples with smallest perplexity and above min_unit
+        candidates = np.argsort(p)  # lower perplexity first
+        for i in candidates:
+            if diff == 0:
+                break
+            if x[i] > min_unit:
+                sub = min(-diff, x[i] - min_unit)
+                x[i] -= sub
+                diff += sub
+
+    assert x.sum() == total, "Final allocation does not sum to M"
+    assert np.all(x >= min_unit) and np.all(x <= max_unit), "Bounds violated"
+
+    return x
+
+
+def compute_perplexity(log_probs, lengths):
+    m, n = log_probs.shape
+    mask = torch.arange(n).unsqueeze(0).expand(m, n) < lengths.unsqueeze(1)
+    neg_sum = -(log_probs * mask).sum(dim=1)
+    ppl = torch.exp(neg_sum / lengths)
+    return ppl
+
+
+class RayPAPOTrainer(RayDAPOTrainer):
     """
     Note that this trainer runs on the driver process on a single CPU/GPU node.
     """
@@ -134,16 +241,41 @@ class RayDAPOTrainer(RayPPOTrainer):
                         batch_keys=["input_ids", "attention_mask", "position_ids"],
                         non_tensor_batch_keys=["raw_prompt_ids"],
                     )
-                gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+
+                batch_size = len(gen_batch)
+                warmup_n = self.config.actor_rollout_ref.rollout.warmup_n
+                max_n = self.config.actor_rollout_ref.rollout.max_n
+                total_n = self.config.actor_rollout_ref.rollout.n
+
+                gen_batch_1 = gen_batch.repeat(repeat_times=warmup_n, interleave=True)
 
                 is_last_step = self.gen_steps >= self.total_training_steps
 
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, "red"):
-                        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-                        timing_raw.update(gen_batch_output.meta_info["timing"])
-                        gen_batch_output.meta_info.pop("timing", None)
+                        gen_batch_output_1 = self.actor_rollout_wg.generate_sequences(gen_batch_1)
+                        timing_raw.update(gen_batch_output_1.meta_info["timing"])
+                        gen_batch_output_1.meta_info.pop("timing", None)
+                    
+                        rollout_log_probs = gen_batch_output_1.batch["rollout_log_probs"]
+                        response_lengths = compute_response_mask(gen_batch_output_1).sum(dim=1)
+                        perplexities = compute_perplexity(rollout_log_probs, response_lengths)
+                        perplexities = perplexities.view(warmup_n, -1).mean(dim=0).cpu().numpy()
+                        allocations = allocate_by_perplexity(
+                            perplexities,
+                            total=batch_size * (total_n - warmup_n),
+                            min_unit=0,
+                            max_unit=max_n - warmup_n,
+                            alpha=1.0,
+                        )
+
+                        gen_batch_2 = gen_batch.repeat_with_list(allocations.tolist(), interleave=True)
+                        gen_batch_output_2 = self.actor_rollout_wg.generate_sequences(gen_batch_2)
+                        timing_raw.update(gen_batch_output_2.meta_info["timing"])
+                        gen_batch_output_2.meta_info.pop("timing", None)
+
+                        gen_batch_output = DataProto.concat([gen_batch_output_1, gen_batch_output_2])
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with marked_timer("gen_max", timing_raw, "red"):
@@ -165,7 +297,9 @@ class RayDAPOTrainer(RayPPOTrainer):
                         [str(uuid.uuid4()) for _ in range(len(new_batch.batch))], dtype=object
                     )
                     # repeat to align with repeated responses in rollout
-                    new_batch = new_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    new_batch_1 = new_batch.repeat(repeat_times=warmup_n, interleave=True)
+                    new_batch_2 = new_batch.repeat_with_list(allocations.tolist(), interleave=True)
+                    new_batch = DataProto.concat([new_batch_1, new_batch_2])
                     new_batch = new_batch.union(gen_batch_output)
 
                     with marked_timer("reward", timing_raw, "yellow"):
@@ -194,6 +328,28 @@ class RayDAPOTrainer(RayPPOTrainer):
                             new_batch.non_tensor_batch.update(
                                 {k: np.array(v) for k, v in reward_extra_infos_dict.items()}
                             )
+
+                        sample_dist_dir = self.config.trainer.sample_dist_dir
+                        allocations = allocations + warmup_n
+                        split_points = np.cumsum(allocations)[:-1]
+                        acc = np.split(np.array(reward_extra_infos_dict["acc"], dtype=object), split_points)
+                        overlong_reward = np.split(np.array(reward_extra_infos_dict["overlong_reward"]), split_points)
+                        if sample_dist_dir:
+                            # Dump sample allocations
+                            sample_dist = [{
+                                "ppl": round(perplexities[i].item(), 4),
+                                "num_samples": allocations[i].item(),
+                                "acc": acc[i].tolist(),
+                                "overlong_reward": overlong_reward[i].tolist()
+                            } for i in range(batch_size)]
+
+                            sample_dist_file = os.path.join(sample_dist_dir, f"gen_step_{self.gen_steps}.json")
+
+                            if not os.path.exists(sample_dist_dir):
+                                os.makedirs(sample_dist_dir)
+                            
+                            with open(sample_dist_file, 'w') as f:
+                                json.dump(sample_dist, f, indent=2)
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
@@ -248,8 +404,8 @@ class RayDAPOTrainer(RayPPOTrainer):
                         batch = new_batch if batch is None else DataProto.concat([batch, new_batch])
 
                         prompt_bsz = self.config.data.train_batch_size
-                        if num_prompt_in_batch < prompt_bsz:
-                            print(f"{num_prompt_in_batch=} < {prompt_bsz=}")
+                        if len(batch) < prompt_bsz * total_n:
+                            print(f"{len(batch)=} < {prompt_bsz * total_n=}")
                             max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
                             if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
                                 print(f"{num_gen_batches=}. Keep generating...")
@@ -400,72 +556,6 @@ class RayDAPOTrainer(RayPPOTrainer):
             metrics = {f"timing/{k}": v for k, v in timing_raw.items()}
             logger.log(data=metrics, step=self.global_steps)
 
-    def _save_checkpoint(self):
-        from verl.utils.fs import local_mkdir_safe
-
-        # path: given_path + `/global_step_{global_steps}` + `/actor`
-        local_global_step_folder = os.path.join(
-            self.config.trainer.default_local_dir, f"global_step_{self.global_steps}"
-        )
-
-        print(f"local_global_step_folder: {local_global_step_folder}")
-        actor_local_path = os.path.join(local_global_step_folder, "actor")
-
-        actor_remote_path = (
-            None
-            if self.config.trainer.default_hdfs_dir is None
-            else os.path.join(self.config.trainer.default_hdfs_dir, f"global_step_{self.global_steps}", "actor")
-        )
-
-        remove_previous_ckpt_in_save = self.config.trainer.get("remove_previous_ckpt_in_save", False)
-        if remove_previous_ckpt_in_save:
-            print(
-                "Warning: remove_previous_ckpt_in_save is deprecated,"
-                + " set max_actor_ckpt_to_keep=1 and max_critic_ckpt_to_keep=1 instead"
-            )
-        max_actor_ckpt_to_keep = (
-            self.config.trainer.get("max_actor_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
-        )
-        max_critic_ckpt_to_keep = (
-            self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
-        )
-
-        self.actor_rollout_wg.save_checkpoint(
-            actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
-        )
-
-        if self.use_critic:
-            critic_local_path = os.path.join(local_global_step_folder, "critic")
-            critic_remote_path = (
-                None
-                if self.config.trainer.default_hdfs_dir is None
-                else os.path.join(self.config.trainer.default_hdfs_dir, f"global_step_{self.global_steps}", "critic")
-            )
-            self.critic_wg.save_checkpoint(
-                critic_local_path, critic_remote_path, self.global_steps, max_ckpt_to_keep=max_critic_ckpt_to_keep
-            )
-
-        # save dataloader
-        local_mkdir_safe(local_global_step_folder)
-        dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
-        dataloader_state_dict = self.train_dataloader.state_dict()
-        torch.save(dataloader_state_dict, dataloader_local_path)
-
-        # latest checkpointed iteration tracker (for atomic usage)
-        local_latest_checkpointed_iteration = os.path.join(
-            self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
-        )
-        with open(local_latest_checkpointed_iteration, "w") as f:
-            f.write(str(self.global_steps))
-        
-        # latest gen step tracker (for atomic usage)
-        local_latest_gen_iteration = os.path.join(
-            self.config.trainer.default_local_dir, "latest_gen_iteration.txt"
-        )
-        with open(local_latest_gen_iteration, "w") as f:
-            f.write(str(self.gen_steps))
-    
-    def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
             return 0
 

@@ -415,6 +415,8 @@
                 { label: 'Score', value: data.score },
                 { label: 'Advantage', value: data.advantage },
                 { label: 'Depth', value: data.depth },
+                { label: 'Avg Entropy', value: data.avg_entropy !== null ? data.avg_entropy : 'N/A' },
+                { label: 'Perplexity', value: data.perplexity !== null ? data.perplexity : 'N/A' },
             ];
             
             sections.forEach(section => {

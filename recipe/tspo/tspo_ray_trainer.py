@@ -160,8 +160,10 @@ class RayTSPOTrainer(RayDAPOTrainer):
                     
                     if self.config.trainer.sampling_tree_dir:
                         for i, tree in enumerate(trees):
-                            tree_file = os.path.join(self.config.trainer.sampling_tree_dir, f"gen_step_{self.gen_steps}/tree_{i}.html")
-                            tree.visualize(tree_file)
+                            tree_json_file = os.path.join(self.config.trainer.sampling_tree_dir, f"gen_step_{self.gen_steps}/tree_{i}.json")
+                            tree.dump_json(tree_json_file)
+                            tree_html_file = os.path.join(self.config.trainer.sampling_tree_dir, f"gen_step_{self.gen_steps}/tree_{i}.html")
+                            tree.visualize(tree_html_file)
 
                     new_batch_list = []
                     for tree in trees:

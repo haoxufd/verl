@@ -46,8 +46,12 @@ from verl.utils.rollout_skip import RolloutSkip
 
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 
+from recipe.dapo.dapo_ray_trainer import RayDAPOTrainer
 
-class RayDAPOTrainer(RayPPOTrainer):
+import json
+
+
+class Collector(RayDAPOTrainer):
     """
     Note that this trainer runs on the driver process on a single CPU/GPU node.
     """
@@ -141,7 +145,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, "red"):
-                        gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                        gen_batch_output = self.actor_rollout_wg.generate_sequences_collector(gen_batch)
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
 
@@ -149,7 +153,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                         with marked_timer("gen_max", timing_raw, "red"):
                             gen_baseline_batch = deepcopy(gen_batch)
                             gen_baseline_batch.meta_info["do_sample"] = False
-                            gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
+                            gen_baseline_output = self.actor_rollout_wg.generate_sequences_collector(gen_baseline_batch)
 
                             new_batch = new_batch.union(gen_baseline_output)
                             reward_baseline_tensor = self.reward_fn(new_batch)
@@ -205,6 +209,67 @@ class RayDAPOTrainer(RayPPOTrainer):
                             )  # TODO: This will be cleared if we use multiple genenration batches
                         else:
                             new_batch.batch["token_level_rewards"] = new_batch.batch["token_level_scores"]
+                    
+                    # Dump rollout data
+                    rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
+                    if rollout_data_dir:
+                        with marked_timer("dump_rollout_generations", timing_raw, color="green"):
+                            inputs = self.tokenizer.batch_decode(new_batch.batch["prompts"], skip_special_tokens=True)
+
+                            response_len = compute_response_mask(new_batch).sum(-1).cpu().tolist()
+
+                            responses = []
+                            log_probs = []
+                            entropys = []
+                            fsdp_log_prob = self.actor_rollout_wg.compute_log_prob(new_batch)
+                            for i in range(len(response_len)):
+                                responses.append(
+                                    new_batch.batch["responses"][i, : response_len[i]].cpu().tolist()
+                                )
+                                log_probs.append(new_batch.batch["rollout_log_probs"][i, : response_len[i]].cpu().tolist())
+                                entropys.append(fsdp_log_prob.batch["entropys"][i, : response_len[i]].cpu().tolist())
+
+                            outputs = self.tokenizer.batch_decode(responses, skip_special_tokens=False)
+                            encode_res = self.tokenizer(outputs, return_offsets_mapping=True)
+                            offsets = encode_res["offset_mapping"]
+                            new_responses = encode_res["input_ids"]
+                            output_tokens_lst = []
+                            seperate_output_tokens_lst = [[self.tokenizer.decode([token_id]) for token_id in resp] for resp in responses]
+                            for output, offset in zip(outputs, offsets):
+                                output_tokens = [output[s:e] for s, e in offset]
+                                output_tokens_lst.append(output_tokens)
+                            
+                            valid = [response == new_response for response, new_response in zip(responses, new_responses)]
+
+                            candidate_token_ids = new_batch.non_tensor_batch["candidate_token_ids"].tolist()
+                            candidate_log_probs = new_batch.non_tensor_batch["candidate_log_probs"].tolist()
+
+                            scores = new_batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+                            sample_gts = [
+                                item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None)
+                                for item in new_batch
+                            ]
+
+                            if "request_id" in new_batch.non_tensor_batch:
+                                reward_extra_infos_dict.setdefault(
+                                    "request_id",
+                                    new_batch.non_tensor_batch["request_id"].tolist(),
+                                )
+
+                            self._dump_generations(
+                                inputs=inputs,
+                                outputs=output_tokens_lst,
+                                seperate_outputs=seperate_output_tokens_lst,
+                                gts=sample_gts,
+                                scores=scores,
+                                log_probs=log_probs,
+                                entropys=entropys,
+                                valid=valid,
+                                candidate_token_ids=candidate_token_ids,
+                                candidate_log_probs=candidate_log_probs,
+                                reward_extra_infos_dict=reward_extra_infos_dict,
+                                dump_path=rollout_data_dir,
+                            )
 
                     if not self.config.algorithm.filter_groups.enable:
                         batch = new_batch
@@ -526,3 +591,40 @@ class RayDAPOTrainer(RayPPOTrainer):
         latest_gen_iteration_local_path = os.path.join(checkpoint_folder, "latest_gen_iteration.txt")
         with open(latest_gen_iteration_local_path, "r") as f:
             self.gen_steps = int(f.read().strip())
+
+    def _dump_generations(self, inputs, outputs, seperate_outputs, gts, scores, log_probs, entropys, valid, candidate_token_ids, candidate_log_probs, reward_extra_infos_dict, dump_path):
+        """Dump rollout/validation samples as JSONL."""
+        os.makedirs(dump_path, exist_ok=True)
+        filename = os.path.join(dump_path, f"{self.gen_steps}.jsonl")
+
+        candidate_tokens = [[[self.tokenizer.decode([token_id]) for token_id in cand_ids] for cand_ids in sample_cand_ids] for sample_cand_ids in candidate_token_ids]
+
+        n = len(inputs)
+        base_data = {
+            "input": inputs,
+            "output": outputs,
+            "seperate_output": seperate_outputs,
+            "gts": gts,
+            "score": scores,
+            "log_prob": log_probs,
+            "entropy": entropys,
+            "valid": valid,
+            "candidate_token_ids": candidate_token_ids,
+            "candidate_tokens": candidate_tokens,
+            "candidate_log_probs": candidate_log_probs,
+            "step": [self.gen_steps] * n,
+        }
+
+        for k, v in reward_extra_infos_dict.items():
+            if len(v) == n:
+                base_data[k] = v
+
+        lines = []
+        for i in range(n):
+            entry = {k: v[i] for k, v in base_data.items()}
+            lines.append(entry)
+
+        with open(filename, "w") as f:
+            json.dump(lines, f, indent=2, ensure_ascii=False)
+
+        print(f"Dumped generations to {filename}")
