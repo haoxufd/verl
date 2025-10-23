@@ -160,6 +160,111 @@ def entropy_from_logits_with_chunking(logits: torch.Tensor, chunk_size: int = 20
     return entropy
 
 
+def entropy_from_logits_top_p(logits: torch.Tensor, p: float = 5.0):
+    """
+    Calculate entropy using only the top p% logits for each sample.
+    logits: (B, V)
+    p: percentage of top logits to use (0 < p <= 100)
+    """
+    B, V = logits.shape
+    k = max(1, int(V * p / 100))  # 至少保留1个
+    # 取每一行前 k 大的 logits
+    top_logits, _ = torch.topk(logits, k=k, dim=-1)  # (B, k)
+    # softmax over top-k
+    pd_top = torch.nn.functional.softmax(top_logits, dim=-1)  # (B, k)
+    # entropy 计算公式：logsumexp - Σ p_i * z_i
+    entropy = torch.logsumexp(top_logits, dim=-1) - torch.sum(pd_top * top_logits, dim=-1)
+    return entropy
+
+
+def entropy_from_logits_with_chunking_top_p(
+    logits: torch.Tensor, p: float = 5.0, chunk_size: int = 2048
+):
+    """
+    Memory-efficient entropy calculation using only top p% logits per sample with chunking.
+    """
+    B, V = logits.shape
+    k = max(1, int(V * p / 100))  # 每个chunk计算时取的top-k数量
+    entropy = torch.zeros(B, device=logits.device)
+
+    for i in range(0, B, chunk_size):
+        logits_chunk = logits[i : i + chunk_size].float()  # (chunk_size, V)
+        top_logits_chunk, _ = torch.topk(logits_chunk, k=k, dim=-1)  # (chunk_size, k)
+        pd_chunk = torch.nn.functional.softmax(top_logits_chunk, dim=-1)
+        entropy_chunk = torch.logsumexp(top_logits_chunk, dim=-1) - torch.sum(
+            pd_chunk * top_logits_chunk, dim=-1
+        )
+        entropy[i : i + chunk_size] = entropy_chunk
+
+    return entropy
+
+
+def entropy_from_logits_top_p_mass(logits: torch.Tensor, p: float = 0.9):
+    """
+    Calculate entropy using the logits that account for the top p (0<p<=1) probability mass.
+    This is nucleus (top-p) truncation.
+    logits: (B, V)
+    p: cumulative probability threshold (e.g., 0.9 means keep top 90% mass)
+    """
+    B, V = logits.shape
+    # softmax over entire vocabulary
+    probs = torch.softmax(logits, dim=-1)  # (B, V)
+    # sort probabilities (and logits) in descending order
+    sorted_probs, sorted_indices = torch.sort(probs, dim=-1, descending=True)
+    sorted_logits = torch.gather(logits, 1, sorted_indices)
+
+    # compute cumulative probability
+    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+    # create a mask where cumulative prob <= p
+    mask = cumulative_probs <= p
+    # always keep the first one (in case p is very small)
+    mask[:, 0] = True
+
+    # number of tokens to keep for each sample
+    k_per_sample = mask.sum(dim=-1)  # (B,)
+
+    # now compute entropy on truncated logits for each row separately
+    entropy = torch.empty(B, device=logits.device)
+    for i in range(B):
+        k_i = k_per_sample[i].item()
+        logits_i = sorted_logits[i, :k_i]
+        pd_i = torch.softmax(logits_i, dim=-1)
+        entropy_i = torch.logsumexp(logits_i, dim=-1) - torch.sum(pd_i * logits_i, dim=-1)
+        entropy[i] = entropy_i
+
+    return entropy
+
+
+def entropy_from_logits_with_chunking_top_p_mass(
+    logits: torch.Tensor, p: float = 0.9, chunk_size: int = 2048
+):
+    """
+    Memory-efficient entropy calculation using top-p probability mass truncation with chunking.
+    """
+    B, V = logits.shape
+    entropy = torch.zeros(B, device=logits.device)
+
+    for start in range(0, B, chunk_size):
+        end = min(start + chunk_size, B)
+        logits_chunk = logits[start:end].float()  # (chunk, V)
+        probs_chunk = torch.softmax(logits_chunk, dim=-1)
+        sorted_probs, sorted_indices = torch.sort(probs_chunk, dim=-1, descending=True)
+        sorted_logits = torch.gather(logits_chunk, 1, sorted_indices)
+        cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+        mask = cumulative_probs <= p
+        mask[:, 0] = True
+        k_per_sample = mask.sum(dim=-1)
+
+        for i in range(end - start):
+            k_i = k_per_sample[i].item()
+            logits_i = sorted_logits[i, :k_i]
+            pd_i = torch.softmax(logits_i, dim=-1)
+            entropy_i = torch.logsumexp(logits_i, dim=-1) - torch.sum(pd_i * logits_i, dim=-1)
+            entropy[start + i] = entropy_i
+
+    return entropy
+
+
 def masked_sum(values, mask, axis=None):
     """Compute mean of tensor with a masked values."""
     # If NaNs exist out of mask, replace NaNs in values with a value that
