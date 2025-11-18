@@ -81,6 +81,18 @@ def main_task(config):
     tokenizer.padding_side = "left"
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    
+    prompt_length_lst = [len(item) for item in tokenizer.apply_chat_template(chat_lst, add_generate_prompt=True)]
+    # 找到最长的 prompt 长度和对应的 index
+    max_prompt_idx, max_prompt_length = max(enumerate(prompt_length_lst), key=lambda x: x[1])
+    max_prompt_length += 50
+    max_prompt_idx = dataset["extra_info"][max_prompt_idx]["index"]
+    print(f"max_prompt_length: {max_prompt_length}, max_prompt_idx: {max_prompt_idx}")
+
+    if config.rollout.prompt_length < max_prompt_length:
+        delta = max_prompt_length - config.rollout.prompt_length
+        config.rollout.prompt_length = max_prompt_length
+        config.rollout.response_length = config.rollout.response_length - delta
 
     ray_cls_with_init = RayClassWithInitArgs(cls=ray.remote(ActorRolloutRefWorker), config=config, role="rollout")
     resource_pool = RayResourcePool(process_on_nodes=[config.trainer.n_gpus_per_node] * config.trainer.nnodes)
@@ -147,6 +159,7 @@ def main_task(config):
     output_dir = os.path.dirname(config.data.output_path)
     makedirs(output_dir, exist_ok=True)
     dataset.to_parquet(config.data.output_path)
+    dataset.to_json(config.data.output_path.replace(".parquet", ".json"), orient="records", lines=False, force_ascii=False, indent=2)
 
 
 if __name__ == "__main__":
