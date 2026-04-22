@@ -129,6 +129,18 @@ class SFTTrainer:
                     OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
                 )
 
+        # Propagate NCCL/network-related env vars from driver to Ray workers.
+        # RayWorkerGroup only forwards a fixed set of system env vars by default.
+        worker_env = {}
+        for key in os.environ:
+            if key.startswith("NCCL_"):
+                worker_env[key] = os.environ[key]
+        for key in ("CUDA_DEVICE_MAX_CONNECTIONS", "GLOO_SOCKET_IFNAME"):
+            if key in os.environ:
+                worker_env[key] = os.environ[key]
+        if worker_env:
+            wg_kwargs["worker_env"] = worker_env
+
         # create resource pool and worker group
         from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 
@@ -380,7 +392,7 @@ class SFTTrainer:
 
 
 def run_sft(config):
-    ray.init()
+    ray.init(address="auto")
     trainer = SFTTrainer(config=config)
     trainer.fit()
 
