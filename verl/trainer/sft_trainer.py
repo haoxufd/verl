@@ -444,6 +444,14 @@ class SFTTrainer:
                         print(f"Final validation metrics: {last_valid_metric}")
                     return
 
+        if global_step < self.total_training_steps:
+            raise RuntimeError(
+                "Training dataloader exhausted before reaching total training steps: "
+                f"global_step={global_step}, total_training_steps={self.total_training_steps}, "
+                f"steps_per_epoch={self.steps_per_epoch}, start_epoch={start_epoch}. "
+                "This usually indicates an invalid resume dataloader state."
+            )
+
 
 def run_sft(config):
     from verl.utils.distributed import initialize_global_process_group

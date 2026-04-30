@@ -162,10 +162,28 @@ class CheckpointHandler:
 
         # Use checkpoint manager to load model state
         self.engine.load_checkpoint(checkpoint_path)
-        # Always load dataloader state for StatefulDataLoader
-        self._load_dataloader_state(checkpoint_path)
+        if self._should_load_dataloader_state(resume_step):
+            self._load_dataloader_state(checkpoint_path)
 
         return resume_step
+
+    def _should_load_dataloader_state(self, resume_step: int) -> bool:
+        try:
+            steps_per_epoch = len(self.train_dataloader)
+        except TypeError:
+            steps_per_epoch = 0
+
+        if resume_step > 0 and steps_per_epoch > 0 and resume_step % steps_per_epoch == 0:
+            log_with_rank(
+                "Skipping dataloader state restore because checkpoint is at an epoch boundary: "
+                f"resume_step={resume_step}, steps_per_epoch={steps_per_epoch}",
+                logger=logger,
+                rank=self.rank,
+                log_only_rank_0=True,
+            )
+            return False
+
+        return True
 
     def _load_dataloader_state(self, checkpoint_path: str):
         """Load dataloader state from checkpoint"""

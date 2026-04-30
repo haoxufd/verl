@@ -181,7 +181,14 @@ async def generate(
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
 def main(config):
-    ray.init(runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_USE_V1": "1"}}, address="auto")
+    ray_runtime_env_vars = {
+        "TOKENIZERS_PARALLELISM": "true",
+        "NCCL_DEBUG": "WARN",
+        "VLLM_USE_V1": "1",
+        # openai_harmony writes tiktoken vocab cache on each Ray worker node.
+        "TIKTOKEN_RS_CACHE_DIR": os.environ.get("TIKTOKEN_RS_CACHE_DIR", "/tmp/tiktoken-rs-cache"),
+    }
+    ray.init(runtime_env={"env_vars": ray_runtime_env_vars}, address="auto")
 
     pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
     OmegaConf.resolve(config)

@@ -135,7 +135,8 @@ class SFTTrainer:
         for key in os.environ:
             if key.startswith("NCCL_"):
                 worker_env[key] = os.environ[key]
-        for key in ("CUDA_DEVICE_MAX_CONNECTIONS", "GLOO_SOCKET_IFNAME"):
+        # Include PYTHONPATH so user-local editable installs/modules are visible on all Ray workers.
+        for key in ("CUDA_DEVICE_MAX_CONNECTIONS", "GLOO_SOCKET_IFNAME", "PYTHONPATH"):
             if key in os.environ:
                 worker_env[key] = os.environ[key]
         if worker_env:
@@ -146,7 +147,7 @@ class SFTTrainer:
 
         n_gpus_per_node = self.config.trainer.n_gpus_per_node
         nnodes = self.config.trainer.nnodes
-        self.resource_pool = RayResourcePool(process_on_nodes=[n_gpus_per_node] * nnodes)
+        self.resource_pool = RayResourcePool(process_on_nodes=[n_gpus_per_node] * nnodes, max_colocate_count=1)
         ray_cls_with_init = RayClassWithInitArgs(ray.remote(TrainingWorker), config=config)
         self.training_client = RayWorkerGroup(
             resource_pool=self.resource_pool,
@@ -154,8 +155,29 @@ class SFTTrainer:
             device_name=self.config.trainer.device,
             **wg_kwargs,
         )
+        self.train_dp_size = self._infer_train_dp_size()
         self.training_client.set_loss_fn(loss_fn=self.loss_fn)
         self.training_client.reset()
+
+    def _infer_train_dp_size(self):
+        sequence_parallel_size = int(getattr(self.config.engine, "ulysses_sequence_parallel_size", 1) or 1)
+        if sequence_parallel_size <= 0:
+            sequence_parallel_size = 1
+
+        world_size = self.training_client.world_size
+        if world_size % sequence_parallel_size != 0:
+            log_with_rank(
+                "Falling back to world size for train DP size because world_size is not divisible by "
+                f"ulysses_sequence_parallel_size: world_size={world_size}, "
+                f"ulysses_sequence_parallel_size={sequence_parallel_size}",
+                logger=logger,
+                rank=0,
+                level=logging.WARNING,
+                log_only_rank_0=True,
+            )
+            return world_size
+
+        return world_size // sequence_parallel_size
 
     def _build_dataset(self):
         config = self.config
@@ -323,7 +345,7 @@ class SFTTrainer:
                 if self.config.trainer.balance_batch:
                     global_seqlen_lst = torch.Tensor([item.size()[0] for item in data["input_ids"]])
                     global_seqlen_lst = calculate_workload(global_seqlen_lst)
-                    dp_size = max(self.training_client._query_dispatch_info("train")) + 1
+                    dp_size = self.train_dp_size
 
                     global_partition_lst = get_seqlen_balanced_partitions(
                         global_seqlen_lst, k_partitions=dp_size, equal_size=True
@@ -389,6 +411,14 @@ class SFTTrainer:
                     print(f"Total time for train steps: {train_time:.2f}s")
                     print(f"Final validation metrics: {last_valid_metric}")
                     return
+
+        if global_step < self.total_training_steps:
+            raise RuntimeError(
+                "Training dataloader exhausted before reaching total training steps: "
+                f"global_step={global_step}, total_training_steps={self.total_training_steps}, "
+                f"steps_per_epoch={self.steps_per_epoch}, start_epoch={start_epoch}. "
+                "This usually indicates an invalid resume dataloader state."
+            )
 
 
 def run_sft(config):
